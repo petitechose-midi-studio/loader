@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 
 mod halfkay;
 mod hex;
+mod serial_reboot;
 mod teensy41;
 
 const EXIT_OK: i32 = 0;
@@ -27,6 +28,9 @@ struct Cli {
 enum Command {
     /// Flash an Intel HEX to a Teensy 4.1 in HalfKay bootloader mode.
     Flash(FlashArgs),
+
+    /// Try to enter HalfKay bootloader without the button.
+    Reboot(RebootArgs),
 
     /// List detected HalfKay devices.
     List(ListArgs),
@@ -53,6 +57,16 @@ struct FlashArgs {
     #[arg(long, default_value_t = 3)]
     retries: u32,
 
+    /// If HalfKay is not detected, try to reboot via USB serial (134 baud).
+    ///
+    /// Note: this requires the device firmware to expose a USB serial interface.
+    #[arg(long)]
+    soft_reboot: bool,
+
+    /// Prefer a specific serial port name for soft reboot (e.g. COM5).
+    #[arg(long)]
+    serial_port: Option<String>,
+
     /// Emit JSON line events to stdout.
     #[arg(long)]
     json: bool,
@@ -69,15 +83,87 @@ struct ListArgs {
     json: bool,
 }
 
+#[derive(Parser)]
+struct RebootArgs {
+    /// Max time to wait for HalfKay to appear (0 = forever).
+    #[arg(long, default_value_t = 60000)]
+    wait_timeout_ms: u64,
+
+    /// Prefer a specific serial port name (e.g. COM6).
+    #[arg(long)]
+    serial_port: Option<String>,
+
+    /// Emit JSON line events to stdout.
+    #[arg(long)]
+    json: bool,
+
+    /// More logs to stderr.
+    #[arg(long, short)]
+    verbose: bool,
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let exit_code = match cli.command {
         Command::Flash(args) => cmd_flash(args),
         Command::List(args) => cmd_list(args),
+        Command::Reboot(args) => cmd_reboot(args),
     };
 
     process::exit(exit_code);
+}
+
+fn cmd_reboot(args: RebootArgs) -> i32 {
+    let wait_timeout = if args.wait_timeout_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(args.wait_timeout_ms))
+    };
+
+    if args.json {
+        emit_json(&JsonEvent::status("reboot_start"));
+    }
+
+    let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref(), args.verbose);
+    if let Err(e) = r {
+        if args.json {
+            emit_json(
+                &JsonEvent::status("error")
+                    .with_u64("code", EXIT_NO_DEVICE as u64)
+                    .with_str("message", &format!("soft reboot failed: {e}")),
+            );
+        }
+        if args.verbose {
+            eprintln!("error: soft reboot failed: {e}");
+        }
+        // Still try waiting (user may have another reboot path).
+    }
+
+    let dev = match halfkay::open_halfkay_device(true, wait_timeout) {
+        Ok(d) => d,
+        Err(e) => {
+            if args.json {
+                emit_json(
+                    &JsonEvent::status("error")
+                        .with_u64("code", EXIT_NO_DEVICE as u64)
+                        .with_str("message", &format!("HalfKay not found: {e}")),
+                );
+            }
+            if args.verbose {
+                eprintln!("error: HalfKay not found: {e}");
+            }
+            return EXIT_NO_DEVICE;
+        }
+    };
+
+    if args.json {
+        emit_json(&JsonEvent::status("halfkay_open").with_str("path", &dev.path));
+    } else {
+        eprintln!("HalfKay open: {}", dev.path);
+    }
+
+    EXIT_OK
 }
 
 fn cmd_list(args: ListArgs) -> i32 {
@@ -152,13 +238,36 @@ fn run_flash(args: &FlashArgs, wait_timeout: Option<Duration>) -> Result<(), Fla
         emit_json(&ev);
     }
 
-    let mut dev = halfkay::open_halfkay_device(args.wait, wait_timeout).map_err(|e| {
-        FlashError::NoDevice(format!(
-            "unable to open HalfKay device (VID:PID {:04X}:{:04X}): {e}",
-            teensy41::VID,
-            teensy41::PID_HALFKAY
-        ))
-    })?;
+    let mut dev = halfkay::open_halfkay_device(false, None)
+        .or_else(|e| {
+            if !matches!(e, halfkay::HalfKayError::NoDevice) {
+                return Err(e);
+            }
+
+            // Best-effort reboot path: if user asked to wait, we can try to enter
+            // bootloader without the physical button.
+            if args.wait || args.soft_reboot {
+                let r =
+                    serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref(), args.verbose);
+                if let Err(e) = r {
+                    if args.verbose {
+                        eprintln!("soft reboot skipped: {e}");
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+
+            let wait = args.wait || args.soft_reboot;
+            halfkay::open_halfkay_device(wait, wait_timeout)
+        })
+        .map_err(|e| {
+            FlashError::NoDevice(format!(
+                "unable to open HalfKay device (VID:PID {:04X}:{:04X}): {e}",
+                teensy41::VID,
+                teensy41::PID_HALFKAY
+            ))
+        })?;
 
     if args.json {
         emit_json(&JsonEvent::status("halfkay_open"));
@@ -187,7 +296,7 @@ fn run_flash(args: &FlashArgs, wait_timeout: Option<Duration>) -> Result<(), Fla
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match halfkay::write_block_teensy41(&dev, &fw, block_addr) {
+            match halfkay::write_block_teensy41(&dev, &fw, block_addr, i) {
                 Ok(()) => break,
                 Err(e) => {
                     if attempt > args.retries {
