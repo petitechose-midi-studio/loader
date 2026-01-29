@@ -1,4 +1,5 @@
 pub mod api;
+pub mod bridge_control;
 pub mod bootloader;
 pub mod halfkay;
 pub mod hex;

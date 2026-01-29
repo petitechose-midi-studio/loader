@@ -1,0 +1,702 @@
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use sysinfo::{Process, System};
+use thiserror::Error;
+
+#[derive(Debug, Clone)]
+pub struct BridgeControlOptions {
+    /// Enable automatic bridge pause/resume.
+    pub enabled: bool,
+    /// Override the OS service identifier.
+    ///
+    /// - Windows: service name (e.g. "OpenControlBridge")
+    /// - Linux: systemd user unit (e.g. "open-control-bridge")
+    /// - macOS: launchd label (e.g. "com.petitechose.open-control-bridge")
+    pub service_id: Option<String>,
+    /// Max time to wait for stop/start.
+    pub timeout: Duration,
+}
+
+impl Default for BridgeControlOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            service_id: None,
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgePauseMethod {
+    Service,
+    Process,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgePauseInfo {
+    pub method: BridgePauseMethod,
+    pub id: String,
+    pub pids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BridgePauseOutcome {
+    Paused(BridgePauseInfo),
+    Skipped(BridgePauseSkipReason),
+    Failed(BridgeControlErrorInfo),
+}
+
+#[derive(Debug, Clone)]
+pub enum BridgePauseSkipReason {
+    Disabled,
+    NotRunning,
+    NotInstalled,
+    ProcessNotRestartable,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeControlErrorInfo {
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+#[derive(Error, Debug)]
+pub enum BridgeControlError {
+    #[error("command failed: {cmd}: {message}")]
+    CommandFailed { cmd: String, message: String },
+
+    #[error("timeout")]
+    Timeout,
+
+    #[error("process restart unavailable")]
+    ProcessRestartUnavailable,
+}
+
+#[derive(Debug, Clone)]
+enum ResumePlan {
+    Service { id: String },
+    Processes { cmds: Vec<RelaunchCmd> },
+}
+
+#[derive(Debug, Clone)]
+struct RelaunchCmd {
+    exe: PathBuf,
+    args: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct BridgeGuard {
+    resume: Option<ResumePlan>,
+    timeout: Duration,
+}
+
+impl BridgeGuard {
+    pub fn resume_hint(&self) -> Option<String> {
+        match self.resume.as_ref() {
+            Some(ResumePlan::Service { id }) => Some(hint_start_service(id)),
+            _ => None,
+        }
+    }
+
+    pub fn resume(&mut self) -> Result<(), BridgeControlError> {
+        let Some(plan) = self.resume.clone() else {
+            return Ok(());
+        };
+        match resume(plan.clone(), self.timeout) {
+            Ok(()) => {
+                self.resume = None;
+                Ok(())
+            }
+            Err(e) => {
+                // Keep the plan for Drop() best-effort retries.
+                self.resume = Some(plan);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        let _ = self.resume();
+    }
+}
+
+pub struct BridgePause {
+    pub guard: Option<BridgeGuard>,
+    pub outcome: BridgePauseOutcome,
+}
+
+pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
+    if !opts.enabled {
+        return BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::Disabled),
+        };
+    }
+
+    let service_id = opts
+        .service_id
+        .clone()
+        .unwrap_or_else(default_service_id_for_platform);
+
+    // 1) service-first
+    match service_status(&service_id) {
+        Ok(ServiceStatus::Running) => match stop_service(&service_id, opts.timeout) {
+            Ok(()) => {
+                let info = BridgePauseInfo {
+                    method: BridgePauseMethod::Service,
+                    id: service_id.clone(),
+                    pids: Vec::new(),
+                };
+                return BridgePause {
+                    guard: Some(BridgeGuard {
+                        resume: Some(ResumePlan::Service { id: service_id }),
+                        timeout: opts.timeout,
+                    }),
+                    outcome: BridgePauseOutcome::Paused(info),
+                };
+            }
+            Err(e) => {
+                return BridgePause {
+                    guard: None,
+                    outcome: BridgePauseOutcome::Failed(error_info(
+                        format!("unable to stop bridge service '{service_id}': {e}"),
+                        Some(hint_stop_service(&service_id)),
+                    )),
+                };
+            }
+        },
+        Ok(ServiceStatus::Stopped) => {
+            return BridgePause {
+                guard: None,
+                outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotRunning),
+            }
+        }
+        Ok(ServiceStatus::NotInstalled) => {}
+        Err(e) => {
+            // Fail-safe: don't guess and kill processes if we can't even query the service.
+            return BridgePause {
+                guard: None,
+                outcome: BridgePauseOutcome::Failed(error_info(
+                    format!("unable to query bridge service '{service_id}': {e}"),
+                    Some(hint_query_service(&service_id)),
+                )),
+            };
+        }
+    }
+
+    // 2) process fallback (only if restartable)
+    let mut system = System::new_all();
+    system.refresh_processes();
+
+    let processes = find_oc_bridge_processes(&system);
+    if processes.is_empty() {
+        return BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotRunning),
+        };
+    }
+
+    let mut relaunch_cmds: Vec<RelaunchCmd> = Vec::new();
+    let mut pids: Vec<u32> = Vec::new();
+
+    for p in &processes {
+        let pid_u32 = p.pid_u32;
+        pids.push(pid_u32);
+
+        let Some(exe) = p.exe.clone() else {
+            return BridgePause {
+                guard: None,
+                outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::ProcessNotRestartable),
+            };
+        };
+
+        let args = p
+            .cmd
+            .clone()
+            .unwrap_or_else(|| vec!["--daemon".to_string(), "--no-relaunch".to_string()]);
+
+        relaunch_cmds.push(RelaunchCmd { exe, args });
+    }
+
+    // Terminate all oc-bridge processes.
+    if let Err(e) = stop_processes(&mut system, &processes, opts.timeout) {
+        return BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(error_info(
+                format!("unable to stop oc-bridge process: {e}"),
+                None,
+            )),
+        };
+    }
+
+    let info = BridgePauseInfo {
+        method: BridgePauseMethod::Process,
+        id: "oc-bridge".to_string(),
+        pids,
+    };
+
+    BridgePause {
+        guard: Some(BridgeGuard {
+            resume: Some(ResumePlan::Processes {
+                cmds: relaunch_cmds,
+            }),
+            timeout: opts.timeout,
+        }),
+        outcome: BridgePauseOutcome::Paused(info),
+    }
+}
+
+fn error_info(message: String, hint: Option<String>) -> BridgeControlErrorInfo {
+    BridgeControlErrorInfo { message, hint }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceStatus {
+    Running,
+    Stopped,
+    NotInstalled,
+}
+
+fn default_service_id_for_platform() -> String {
+    // Mirrors midi-studio/core/script/pio/oc_service.py.
+    #[cfg(windows)]
+    {
+        "OpenControlBridge".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "open-control-bridge".to_string()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "com.petitechose.open-control-bridge".to_string()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        "oc-bridge".to_string()
+    }
+}
+
+fn hint_stop_service(service_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("Try: sc stop {service_id}")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        format!("Try: systemctl --user stop {service_id}")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("Try: launchctl stop {service_id}")
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        "".to_string()
+    }
+}
+
+fn hint_query_service(service_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("Try: sc query {service_id}")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        format!("Try: systemctl --user status {service_id}")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("Try: launchctl list {service_id}")
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        "".to_string()
+    }
+}
+
+fn hint_start_service(service_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("Try: sc start {service_id}")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        format!("Try: systemctl --user start {service_id}")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("Try: launchctl start {service_id}")
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        "".to_string()
+    }
+}
+
+fn service_status(service_id: &str) -> Result<ServiceStatus, BridgeControlError> {
+    #[cfg(windows)]
+    {
+        let out = run_capture("sc", &["query", service_id], None)?;
+        if out.status_code != 0 {
+            // 1060 = service not installed.
+            if out.text.contains("1060") {
+                return Ok(ServiceStatus::NotInstalled);
+            }
+            return Err(BridgeControlError::CommandFailed {
+                cmd: format!("sc query {service_id}"),
+                message: out.text,
+            });
+        }
+
+        match parse_sc_state(&out.text) {
+            Some(1) => Ok(ServiceStatus::Stopped),
+            Some(4) => Ok(ServiceStatus::Running),
+            Some(_) => Ok(ServiceStatus::Running),
+            None => Err(BridgeControlError::CommandFailed {
+                cmd: format!("sc query {service_id}"),
+                message: "unable to parse service state".to_string(),
+            }),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let out = run_capture(
+            "systemctl",
+            &["--user", "is-active", service_id],
+            Some(linux_user_env_fix()),
+        )?;
+        if out.status_code == 0 {
+            return Ok(ServiceStatus::Running);
+        }
+        // "inactive" and "unknown" are both non-zero; treat unknown as not installed.
+        if out.text.contains("not-found") || out.text.contains("could not be found") {
+            return Ok(ServiceStatus::NotInstalled);
+        }
+        Ok(ServiceStatus::Stopped)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let out = run_capture("launchctl", &["list", service_id], None)?;
+        if out.status_code == 0 {
+            return Ok(ServiceStatus::Running);
+        }
+        Ok(ServiceStatus::NotInstalled)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = service_id;
+        Ok(ServiceStatus::NotInstalled)
+    }
+}
+
+fn stop_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControlError> {
+    #[cfg(windows)]
+    {
+        let _ = run_capture("sc", &["stop", service_id], None)?;
+        wait_for_service_state(service_id, 1, timeout)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = run_capture(
+            "systemctl",
+            &["--user", "stop", service_id],
+            Some(linux_user_env_fix()),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_capture("launchctl", &["stop", service_id], None)?;
+        Ok(())
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (service_id, timeout);
+        Ok(())
+    }
+}
+
+fn start_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControlError> {
+    #[cfg(windows)]
+    {
+        let _ = run_capture("sc", &["start", service_id], None)?;
+        wait_for_service_state(service_id, 4, timeout)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = run_capture(
+            "systemctl",
+            &["--user", "start", service_id],
+            Some(linux_user_env_fix()),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_capture("launchctl", &["start", service_id], None)?;
+        Ok(())
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (service_id, timeout);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_service_state(
+    service_id: &str,
+    desired: u32,
+    timeout: Duration,
+) -> Result<(), BridgeControlError> {
+    let start = Instant::now();
+    loop {
+        let out = run_capture("sc", &["query", service_id], None)?;
+        if let Some(state) = parse_sc_state(&out.text) {
+            if state == desired {
+                return Ok(());
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Err(BridgeControlError::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(windows)]
+fn parse_sc_state(text: &str) -> Option<u32> {
+    // We avoid localized keywords (RUNNING/STOPPED). Look for a line containing STATE/ETAT
+    // and parse the first integer after ':'.
+    for line in text.lines() {
+        let upper = line.to_ascii_uppercase();
+        if !upper.contains("STATE") && !upper.contains("ETAT") {
+            continue;
+        }
+
+        let (_, rhs) = line.split_once(':')?;
+        let rhs = rhs.trim_start();
+        let mut num = String::new();
+        for ch in rhs.chars() {
+            if ch.is_ascii_digit() {
+                num.push(ch);
+            } else if !num.is_empty() {
+                break;
+            }
+        }
+        if num.is_empty() {
+            continue;
+        }
+        if let Ok(v) = num.parse::<u32>() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn resume(plan: ResumePlan, timeout: Duration) -> Result<(), BridgeControlError> {
+    match plan {
+        ResumePlan::Service { id } => start_service(&id, timeout),
+        ResumePlan::Processes { cmds } => {
+            for c in cmds {
+                let mut cmd = Command::new(&c.exe);
+                cmd.args(&c.args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let _ = cmd.spawn().map_err(|e| BridgeControlError::CommandFailed {
+                    cmd: format!("spawn {:?}", c.exe),
+                    message: e.to_string(),
+                })?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CmdOutput {
+    status_code: i32,
+    text: String,
+}
+
+fn run_capture(
+    program: &str,
+    args: &[&str],
+    env: Option<Vec<(String, String)>>,
+) -> Result<CmdOutput, BridgeControlError> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(env) = env {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| BridgeControlError::CommandFailed {
+            cmd: format!("{program} {}", args.join(" ")),
+            message: e.to_string(),
+        })?;
+
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&out.stdout));
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    Ok(CmdOutput {
+        status_code: out.status.code().unwrap_or(-1),
+        text,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_env_fix() -> Vec<(String, String)> {
+    // Mirrors midi-studio/core/script/pio/oc_service.py.
+    let mut out: Vec<(String, String)> = Vec::new();
+
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        if let Ok(uid) = std::env::var("UID") {
+            out.push(("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")));
+        }
+    }
+
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        if let Ok(uid) = std::env::var("UID") {
+            out.push((
+                "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                format!("unix:path=/run/user/{uid}/bus"),
+            ));
+        }
+    }
+
+    out
+}
+
+#[derive(Debug, Clone)]
+struct OcBridgeProcess {
+    pid_u32: u32,
+    exe: Option<PathBuf>,
+    cmd: Option<Vec<String>>,
+}
+
+fn find_oc_bridge_processes(system: &System) -> Vec<OcBridgeProcess> {
+    system
+        .processes()
+        .iter()
+        .filter_map(|(pid, p)| {
+            let name = p.name();
+            if !is_oc_bridge_name(name) {
+                return None;
+            }
+
+            let exe = p.exe().and_then(|e| {
+                if e.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(e.to_path_buf())
+                }
+            });
+
+            let cmd = {
+                let c = p.cmd();
+                if c.is_empty() {
+                    None
+                } else {
+                    // sysinfo typically includes argv[0] as the executable. We store argv[1..]
+                    // so we can restart from the known exe path.
+                    Some(c.iter().skip(1).cloned().collect())
+                }
+            };
+
+            Some(OcBridgeProcess {
+                pid_u32: pid.as_u32(),
+                exe,
+                cmd,
+            })
+        })
+        .collect()
+}
+
+fn is_oc_bridge_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "oc-bridge" || n == "oc-bridge.exe"
+}
+
+fn stop_processes(
+    system: &mut System,
+    procs: &[OcBridgeProcess],
+    timeout: Duration,
+) -> Result<(), BridgeControlError> {
+    // Best-effort: ask processes to exit.
+    for p in procs {
+        if let Some(proc_) = get_process_by_pid(system, p.pid_u32) {
+            let _ = proc_.kill();
+        }
+    }
+
+    let start = Instant::now();
+    loop {
+        system.refresh_processes();
+        let still_running = procs
+            .iter()
+            .any(|p| get_process_by_pid(system, p.pid_u32).is_some());
+        if !still_running {
+            return Ok(());
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(BridgeControlError::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn get_process_by_pid(system: &System, pid_u32: u32) -> Option<&Process> {
+    system.processes().iter().find_map(|(pid, p)| {
+        if pid.as_u32() == pid_u32 {
+            Some(p)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::parse_sc_state;
+
+    #[cfg(windows)]
+    #[test]
+    fn test_parse_sc_state_running() {
+        let s = "STATE              : 4  RUNNING\r\n";
+        assert_eq!(parse_sc_state(s), Some(4));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_parse_sc_state_stopped() {
+        let s = "STATE              : 1  STOPPED\r\n";
+        assert_eq!(parse_sc_state(s), Some(1));
+    }
+}

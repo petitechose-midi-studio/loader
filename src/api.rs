@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::{
-    bootloader, halfkay, hex, selector, serial_reboot, targets,
+    bootloader, bridge_control, halfkay, hex, selector, serial_reboot, targets,
     targets::{Target, TargetKind},
 };
 
@@ -34,6 +34,8 @@ pub struct FlashOptions {
     /// Example: "COM6" or "/dev/ttyACM0".
     pub serial_port: Option<String>,
 
+    pub bridge: bridge_control::BridgeControlOptions,
+
     pub reopen_timeout: Duration,
     pub reopen_delay: Duration,
     pub soft_reboot_delay: Duration,
@@ -47,6 +49,7 @@ impl Default for FlashOptions {
             no_reboot: false,
             retries: 3,
             serial_port: None,
+            bridge: bridge_control::BridgeControlOptions::default(),
             reopen_timeout: Duration::from_secs(10),
             reopen_delay: Duration::from_millis(150),
             soft_reboot_delay: Duration::from_millis(250),
@@ -66,6 +69,22 @@ pub enum FlashEvent {
     },
     TargetSelected {
         target_id: String,
+    },
+
+    BridgePauseStart,
+    BridgePaused {
+        info: bridge_control::BridgePauseInfo,
+    },
+    BridgePauseSkipped {
+        reason: bridge_control::BridgePauseSkipReason,
+    },
+    BridgePauseFailed {
+        error: bridge_control::BridgeControlErrorInfo,
+    },
+    BridgeResumeStart,
+    BridgeResumed,
+    BridgeResumeFailed {
+        error: bridge_control::BridgeControlErrorInfo,
     },
 
     HexLoaded {
@@ -232,8 +251,33 @@ where
     let targets = discover_targets_for_flash(opts, &mut on_event)?;
     let selected = select_targets(selection, opts, &targets, &mut on_event)?;
 
+    let needs_serial = selected.iter().any(|t| t.kind() == TargetKind::Serial);
+    let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
+    if needs_serial {
+        on_event(FlashEvent::BridgePauseStart);
+        let paused = bridge_control::pause_oc_bridge(&opts.bridge);
+        match &paused.outcome {
+            bridge_control::BridgePauseOutcome::Paused(info) => {
+                on_event(FlashEvent::BridgePaused { info: info.clone() });
+            }
+            bridge_control::BridgePauseOutcome::Skipped(reason) => {
+                on_event(FlashEvent::BridgePauseSkipped {
+                    reason: reason.clone(),
+                });
+            }
+            bridge_control::BridgePauseOutcome::Failed(error) => {
+                on_event(FlashEvent::BridgePauseFailed {
+                    error: error.clone(),
+                });
+            }
+        }
+        bridge_guard = paused.guard;
+    }
+
     let total = selected.len();
+    let multi = total > 1;
     let mut failed = 0usize;
+    let mut fatal_err: Option<FlashError> = None;
 
     for target in selected {
         let target_id = target.id();
@@ -259,19 +303,37 @@ where
                     message: Some(e.to_string()),
                 });
 
-                // In single-target modes, fail immediately.
-                if total == 1 {
-                    return Err(e);
+                if !multi {
+                    fatal_err = Some(e);
+                    break;
                 }
             }
         }
     }
 
-    if failed > 0 {
-        return Err(FlashError::MultiTargetFailed { failed, total });
+    let result = if let Some(e) = fatal_err {
+        Err(e)
+    } else if failed > 0 {
+        Err(FlashError::MultiTargetFailed { failed, total })
+    } else {
+        Ok(())
+    };
+
+    if let Some(mut g) = bridge_guard {
+        on_event(FlashEvent::BridgeResumeStart);
+        let hint = g.resume_hint();
+        match g.resume() {
+            Ok(()) => on_event(FlashEvent::BridgeResumed),
+            Err(e) => on_event(FlashEvent::BridgeResumeFailed {
+                error: bridge_control::BridgeControlErrorInfo {
+                    message: format!("bridge resume failed: {e}"),
+                    hint,
+                },
+            }),
+        }
     }
 
-    Ok(())
+    result
 }
 
 fn discover_targets_for_flash<F>(

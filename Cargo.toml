@@ -21,6 +21,7 @@ hidapi = "2.6.3"
 serialport = "4.6.1"
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117", optional = true }
+sysinfo = "0.30.13"
 thiserror = "1.0.61"
 
 [target.'cfg(windows)'.dependencies]

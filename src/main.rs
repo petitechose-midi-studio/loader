@@ -35,6 +35,25 @@ enum Command {
 }
 
 #[derive(Parser)]
+struct BridgeControlArgs {
+    /// Disable automatic oc-bridge pause/resume.
+    #[arg(long)]
+    no_bridge_control: bool,
+
+    /// Max time to wait when stopping/starting the bridge.
+    #[arg(long, default_value_t = 5000)]
+    bridge_timeout_ms: u64,
+
+    /// Override the bridge service identifier.
+    ///
+    /// - Windows: service name (default: OpenControlBridge)
+    /// - Linux: systemd user unit (default: open-control-bridge)
+    /// - macOS: launchd label (default: com.petitechose.open-control-bridge)
+    #[arg(long)]
+    bridge_service_id: Option<String>,
+}
+
+#[derive(Parser)]
 struct FlashArgs {
     /// Path to Intel HEX firmware.
     hex: PathBuf,
@@ -66,6 +85,9 @@ struct FlashArgs {
     /// Prefer a specific serial port name (e.g. COM6) when selecting among multiple devices.
     #[arg(long)]
     serial_port: Option<String>,
+
+    #[command(flatten)]
+    bridge: BridgeControlArgs,
 
     /// Emit JSON line events to stdout.
     #[arg(long)]
@@ -100,6 +122,9 @@ struct RebootArgs {
     /// Prefer a specific serial port name (e.g. COM6).
     #[arg(long)]
     serial_port: Option<String>,
+
+    #[command(flatten)]
+    bridge: BridgeControlArgs,
 
     /// Emit JSON line events to stdout.
     #[arg(long)]
@@ -219,6 +244,66 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
         }
     };
 
+    let needs_serial = selected
+        .iter()
+        .any(|t| matches!(t, targets::Target::Serial(_)));
+    let mut bridge_guard: Option<midi_studio_loader::bridge_control::BridgeGuard> = None;
+    if needs_serial {
+        let bridge = midi_studio_loader::bridge_control::BridgeControlOptions {
+            enabled: !args.bridge.no_bridge_control,
+            service_id: args.bridge.bridge_service_id.clone(),
+            timeout: Duration::from_millis(args.bridge.bridge_timeout_ms),
+        };
+
+        if args.json {
+            emit_json(&JsonEvent::status("bridge_pause_start"));
+        } else if args.verbose {
+            eprintln!("pausing oc-bridge...");
+        }
+
+        let paused = midi_studio_loader::bridge_control::pause_oc_bridge(&bridge);
+        match &paused.outcome {
+            midi_studio_loader::bridge_control::BridgePauseOutcome::Paused(info) => {
+                if args.json {
+                    let method = match info.method {
+                        midi_studio_loader::bridge_control::BridgePauseMethod::Service => "service",
+                        midi_studio_loader::bridge_control::BridgePauseMethod::Process => "process",
+                    };
+                    emit_json(
+                        &JsonEvent::status("bridge_paused")
+                            .with_str("method", method)
+                            .with_str("id", &info.id)
+                            .with_value(
+                                "pids",
+                                serde_json::Value::Array(
+                                    info.pids
+                                        .iter()
+                                        .map(|p| serde_json::Value::from(*p as u64))
+                                        .collect(),
+                                ),
+                            ),
+                    );
+                } else if args.verbose {
+                    eprintln!("oc-bridge paused ({:?})", info.method);
+                }
+            }
+            midi_studio_loader::bridge_control::BridgePauseOutcome::Skipped(_) => {
+                if args.verbose {
+                    eprintln!("oc-bridge pause skipped");
+                }
+            }
+            midi_studio_loader::bridge_control::BridgePauseOutcome::Failed(e) => {
+                if args.verbose {
+                    eprintln!("oc-bridge pause failed: {}", e.message);
+                    if let Some(hint) = &e.hint {
+                        eprintln!("hint: {hint}");
+                    }
+                }
+            }
+        }
+        bridge_guard = paused.guard;
+    }
+
     let mut any_failed = false;
     let mut any_ambiguous = false;
 
@@ -315,13 +400,46 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
         }
     }
 
-    if any_ambiguous {
-        return EXIT_AMBIGUOUS;
+    let exit_code = if any_ambiguous {
+        EXIT_AMBIGUOUS
+    } else if any_failed {
+        EXIT_NO_DEVICE
+    } else {
+        EXIT_OK
+    };
+
+    if let Some(mut g) = bridge_guard {
+        if args.json {
+            emit_json(&JsonEvent::status("bridge_resume_start"));
+        } else if args.verbose {
+            eprintln!("resuming oc-bridge...");
+        }
+
+        let hint = g.resume_hint();
+        match g.resume() {
+            Ok(()) => {
+                if args.json {
+                    emit_json(&JsonEvent::status("bridge_resumed"));
+                } else if args.verbose {
+                    eprintln!("oc-bridge resumed");
+                }
+            }
+            Err(e) => {
+                if args.json {
+                    let mut ev = JsonEvent::status("bridge_resume_failed")
+                        .with_str("message", &e.to_string());
+                    if let Some(hint) = hint {
+                        ev = ev.with_str("hint", &hint);
+                    }
+                    emit_json(&ev);
+                } else if args.verbose {
+                    eprintln!("oc-bridge resume failed: {e}");
+                }
+            }
+        }
     }
-    if any_failed {
-        return EXIT_NO_DEVICE;
-    }
-    EXIT_OK
+
+    exit_code
 }
 
 fn cmd_list(args: ListArgs) -> i32 {
@@ -380,12 +498,19 @@ fn cmd_flash(args: FlashArgs) -> i32 {
         Some(Duration::from_millis(args.wait_timeout_ms))
     };
 
+    let bridge = midi_studio_loader::bridge_control::BridgeControlOptions {
+        enabled: !args.bridge.no_bridge_control,
+        service_id: args.bridge.bridge_service_id.clone(),
+        timeout: Duration::from_millis(args.bridge.bridge_timeout_ms),
+    };
+
     let opts = api::FlashOptions {
         wait: args.wait,
         wait_timeout,
         no_reboot: args.no_reboot,
         retries: args.retries,
         serial_port: args.serial_port.clone(),
+        bridge,
         ..Default::default()
     };
 
@@ -453,6 +578,99 @@ fn handle_flash_event(args: &FlashArgs, ev: api::FlashEvent) {
                 emit_json(&JsonEvent::status("target_selected").with_str("target_id", &target_id));
             } else if args.verbose {
                 eprintln!("selected: {target_id}");
+            }
+        }
+        api::FlashEvent::BridgePauseStart => {
+            if args.json {
+                emit_json(&JsonEvent::status("bridge_pause_start"));
+            } else if args.verbose {
+                eprintln!("pausing oc-bridge...");
+            }
+        }
+        api::FlashEvent::BridgePaused { info } => {
+            if args.json {
+                let method = match info.method {
+                    midi_studio_loader::bridge_control::BridgePauseMethod::Service => "service",
+                    midi_studio_loader::bridge_control::BridgePauseMethod::Process => "process",
+                };
+                emit_json(
+                    &JsonEvent::status("bridge_paused")
+                        .with_str("method", method)
+                        .with_str("id", &info.id)
+                        .with_value(
+                            "pids",
+                            serde_json::Value::Array(
+                                info.pids
+                                    .iter()
+                                    .map(|p| serde_json::Value::from(*p as u64))
+                                    .collect(),
+                            ),
+                        ),
+                );
+            } else if args.verbose {
+                eprintln!("oc-bridge paused ({:?})", info.method);
+            }
+        }
+        api::FlashEvent::BridgePauseSkipped { reason } => {
+            if args.json {
+                let reason = match reason {
+                    midi_studio_loader::bridge_control::BridgePauseSkipReason::Disabled => {
+                        "disabled"
+                    }
+                    midi_studio_loader::bridge_control::BridgePauseSkipReason::NotRunning => {
+                        "not_running"
+                    }
+                    midi_studio_loader::bridge_control::BridgePauseSkipReason::NotInstalled => {
+                        "not_installed"
+                    }
+                    midi_studio_loader::bridge_control::BridgePauseSkipReason::ProcessNotRestartable => {
+                        "process_not_restartable"
+                    }
+                };
+                emit_json(&JsonEvent::status("bridge_pause_skipped").with_str("reason", reason));
+            } else if args.verbose {
+                eprintln!("oc-bridge pause skipped");
+            }
+        }
+        api::FlashEvent::BridgePauseFailed { error } => {
+            if args.json {
+                let mut ev =
+                    JsonEvent::status("bridge_pause_failed").with_str("message", &error.message);
+                if let Some(hint) = &error.hint {
+                    ev = ev.with_str("hint", hint);
+                }
+                emit_json(&ev);
+            } else if args.verbose {
+                eprintln!("oc-bridge pause failed: {}", error.message);
+                if let Some(hint) = &error.hint {
+                    eprintln!("hint: {hint}");
+                }
+            }
+        }
+        api::FlashEvent::BridgeResumeStart => {
+            if args.json {
+                emit_json(&JsonEvent::status("bridge_resume_start"));
+            } else if args.verbose {
+                eprintln!("resuming oc-bridge...");
+            }
+        }
+        api::FlashEvent::BridgeResumed => {
+            if args.json {
+                emit_json(&JsonEvent::status("bridge_resumed"));
+            } else if args.verbose {
+                eprintln!("oc-bridge resumed");
+            }
+        }
+        api::FlashEvent::BridgeResumeFailed { error } => {
+            if args.json {
+                let mut ev =
+                    JsonEvent::status("bridge_resume_failed").with_str("message", &error.message);
+                if let Some(hint) = &error.hint {
+                    ev = ev.with_str("hint", hint);
+                }
+                emit_json(&ev);
+            } else if args.verbose {
+                eprintln!("oc-bridge resume failed: {}", error.message);
             }
         }
         api::FlashEvent::HexLoaded { bytes, blocks } => {
@@ -645,6 +863,11 @@ impl JsonEvent {
 
     fn with_str(mut self, k: &'static str, v: &str) -> Self {
         self.fields.insert(k, serde_json::Value::from(v));
+        self
+    }
+
+    fn with_value(mut self, k: &'static str, v: serde_json::Value) -> Self {
+        self.fields.insert(k, v);
         self
     }
 }
