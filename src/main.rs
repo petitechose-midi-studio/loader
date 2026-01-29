@@ -30,7 +30,7 @@ enum Command {
     /// Try to enter HalfKay bootloader without the button.
     Reboot(RebootArgs),
 
-    /// List detected HalfKay devices.
+    /// List detected targets (HalfKay + PJRC USB serial).
     List(ListArgs),
 }
 
@@ -47,7 +47,7 @@ struct FlashArgs {
     #[arg(long, conflicts_with = "all")]
     device: Option<String>,
 
-    /// Wait for HalfKay bootloader to appear.
+    /// Wait for a target to appear (HalfKay or PJRC USB serial).
     #[arg(long)]
     wait: bool,
 
