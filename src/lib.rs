@@ -1,3 +1,4 @@
+pub mod api;
 pub mod halfkay;
 pub mod hex;
 pub mod serial_reboot;

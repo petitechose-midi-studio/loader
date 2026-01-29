@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use midi_studio_loader::{halfkay, hex, serial_reboot, teensy41};
+use midi_studio_loader::{api, halfkay, serial_reboot, teensy41};
 
 const EXIT_OK: i32 = 0;
 const EXIT_NO_DEVICE: i32 = 10;
@@ -205,145 +205,97 @@ fn cmd_flash(args: FlashArgs) -> i32 {
         Some(Duration::from_millis(args.wait_timeout_ms))
     };
 
-    match run_flash(&args, wait_timeout) {
+    let opts = api::FlashOptions {
+        wait: args.wait,
+        wait_timeout,
+        no_reboot: args.no_reboot,
+        retries: args.retries,
+        soft_reboot: args.soft_reboot,
+        serial_port: args.serial_port.clone(),
+        ..Default::default()
+    };
+
+    let r = api::flash_teensy41(&args.hex, &opts, |ev| handle_flash_event(&args, ev));
+    match r {
         Ok(()) => EXIT_OK,
-        Err(FlashError::NoDevice(msg)) => {
-            emit_error(&args, EXIT_NO_DEVICE, &msg);
-            EXIT_NO_DEVICE
-        }
-        Err(FlashError::InvalidHex(msg)) => {
-            emit_error(&args, EXIT_INVALID_HEX, &msg);
-            EXIT_INVALID_HEX
-        }
-        Err(FlashError::WriteFailed(msg)) => {
-            emit_error(&args, EXIT_WRITE_FAILED, &msg);
-            EXIT_WRITE_FAILED
+        Err(e) => {
+            let code = match e.kind() {
+                api::FlashErrorKind::NoDevice => EXIT_NO_DEVICE,
+                api::FlashErrorKind::InvalidHex => EXIT_INVALID_HEX,
+                api::FlashErrorKind::WriteFailed => EXIT_WRITE_FAILED,
+            };
+            emit_error(&args, code, &e.to_string());
+            code
         }
     }
 }
 
-fn run_flash(args: &FlashArgs, wait_timeout: Option<Duration>) -> Result<(), FlashError> {
-    let fw = hex::FirmwareImage::load_teensy41(&args.hex)
-        .map_err(|e| FlashError::InvalidHex(e.to_string()))?;
-
-    if args.verbose && !args.json {
-        eprintln!(
-            "Loaded {} bytes ({} blocks) for Teensy 4.1",
-            fw.byte_count, fw.num_blocks
-        );
-    }
-
-    if args.json {
-        let ev = JsonEvent::status("hex_loaded")
-            .with_u64("bytes", fw.byte_count as u64)
-            .with_u64("blocks", fw.num_blocks as u64);
-        emit_json(&ev);
-    }
-
-    let mut dev = halfkay::open_halfkay_device(false, None)
-        .or_else(|e| {
-            if !matches!(e, halfkay::HalfKayError::NoDevice) {
-                return Err(e);
+fn handle_flash_event(args: &FlashArgs, ev: api::FlashEvent) {
+    match ev {
+        api::FlashEvent::HexLoaded { bytes, blocks } => {
+            if args.verbose && !args.json {
+                eprintln!("Loaded {} bytes ({} blocks) for Teensy 4.1", bytes, blocks);
             }
-
-            // Best-effort reboot path: if user asked to wait, we can try to enter
-            // bootloader without the physical button.
-            if args.wait || args.soft_reboot {
-                let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref());
-                if let Ok(port_name) = &r {
-                    if args.verbose && !args.json {
-                        eprintln!("Soft reboot via serial: {port_name} (baud=134)");
-                    }
-                }
-                if let Err(e) = r {
-                    if args.verbose {
-                        eprintln!("soft reboot skipped: {e}");
-                    }
-                } else {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
+            if args.json {
+                emit_json(
+                    &JsonEvent::status("hex_loaded")
+                        .with_u64("bytes", bytes as u64)
+                        .with_u64("blocks", blocks as u64),
+                );
             }
-
-            let wait = args.wait || args.soft_reboot;
-            halfkay::open_halfkay_device(wait, wait_timeout)
-        })
-        .map_err(|e| {
-            FlashError::NoDevice(format!(
-                "unable to open HalfKay device (VID:PID {:04X}:{:04X}): {e}",
-                teensy41::VID,
-                teensy41::PID_HALFKAY
-            ))
-        })?;
-
-    if args.json {
-        emit_json(&JsonEvent::status("halfkay_open"));
-    } else if args.verbose {
-        eprintln!("HalfKay open: {}", dev.path);
-    }
-
-    let total_to_write = fw.blocks_to_write.len();
-    for (i, block_addr) in fw.blocks_to_write.iter().copied().enumerate() {
-        if args.json {
-            emit_json(
-                &JsonEvent::status("block")
-                    .with_u64("i", i as u64)
-                    .with_u64("n", total_to_write as u64)
-                    .with_u64("addr", block_addr as u64),
-            );
-        } else if args.verbose {
-            eprintln!(
-                "program block {}/{} @ 0x{:06X}",
-                i + 1,
-                total_to_write,
-                block_addr
-            );
         }
-
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            match halfkay::write_block_teensy41(&dev, &fw, block_addr, i) {
-                Ok(()) => break,
-                Err(e) => {
-                    if attempt > args.retries {
-                        return Err(FlashError::WriteFailed(format!(
-                            "write failed at addr=0x{block_addr:06X} after {attempt} attempts: {e}"
-                        )));
-                    }
-
-                    if args.verbose {
-                        eprintln!(
-                            "write failed at 0x{block_addr:06X} (attempt {attempt}/{}) - reopening: {e}",
-                            args.retries
-                        );
-                    }
-
-                    std::thread::sleep(Duration::from_millis(150));
-                    dev = halfkay::open_halfkay_device(true, Some(Duration::from_secs(10)))
-                        .map_err(|e2| {
-                            FlashError::WriteFailed(format!(
-                                "unable to reopen HalfKay device: {e2}"
-                            ))
-                        })?;
-                    std::thread::sleep(Duration::from_millis(150));
-                }
+        api::FlashEvent::SoftReboot { port } => {
+            if args.verbose && !args.json {
+                eprintln!("Soft reboot via serial: {port} (baud=134)");
+            }
+        }
+        api::FlashEvent::SoftRebootSkipped { error } => {
+            if args.verbose {
+                eprintln!("soft reboot skipped: {error}");
+            }
+        }
+        api::FlashEvent::HalfKayOpen { path } => {
+            if args.json {
+                emit_json(&JsonEvent::status("halfkay_open"));
+            } else if args.verbose {
+                eprintln!("HalfKay open: {path}");
+            }
+        }
+        api::FlashEvent::Block { index, total, addr } => {
+            if args.json {
+                emit_json(
+                    &JsonEvent::status("block")
+                        .with_u64("i", index as u64)
+                        .with_u64("n", total as u64)
+                        .with_u64("addr", addr as u64),
+                );
+            } else if args.verbose {
+                eprintln!("program block {}/{} @ 0x{:06X}", index + 1, total, addr);
+            }
+        }
+        api::FlashEvent::Retry {
+            addr,
+            attempt,
+            retries,
+            error,
+        } => {
+            if args.verbose {
+                eprintln!(
+                    "write failed at 0x{addr:06X} (attempt {attempt}/{retries}) - reopening: {error}"
+                );
+            }
+        }
+        api::FlashEvent::Boot => {
+            if args.json {
+                emit_json(&JsonEvent::status("boot"));
+            }
+        }
+        api::FlashEvent::Done => {
+            if args.json {
+                emit_json(&JsonEvent::status("done"));
             }
         }
     }
-
-    if !args.no_reboot {
-        if args.json {
-            emit_json(&JsonEvent::status("boot"));
-        }
-        // Best-effort (device may disappear quickly).
-        let _ = halfkay::boot_teensy41(&dev);
-    }
-
-    if args.json {
-        emit_json(&JsonEvent::status("done"));
-    }
-
-    Ok(())
 }
 
 fn emit_error(args: &FlashArgs, code: i32, msg: &str) {
@@ -357,13 +309,6 @@ fn emit_error(args: &FlashArgs, code: i32, msg: &str) {
     if !args.json || args.verbose {
         eprintln!("error: {msg}");
     }
-}
-
-#[derive(Debug)]
-enum FlashError {
-    NoDevice(String),
-    InvalidHex(String),
-    WriteFailed(String),
 }
 
 #[derive(serde::Serialize)]
