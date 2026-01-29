@@ -6,12 +6,21 @@ license = "MIT OR Apache-2.0"
 description = "Teensy 4.1 flasher CLI for MIDI Studio (HalfKay bootloader)"
 repository = "https://github.com/petitechose-midi-studio/loader"
 
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:serde_json"]
+
+[[bin]]
+name = "midi-studio-loader"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
-clap = { version = "4.5.27", features = ["derive"] }
+clap = { version = "4.5.27", features = ["derive"], optional = true }
 hidapi = "2.6.3"
 serialport = "4.6.1"
 serde = { version = "1.0.203", features = ["derive"] }
-serde_json = "1.0.117"
+serde_json = { version = "1.0.117", optional = true }
 thiserror = "1.0.61"
 
 [target.'cfg(windows)'.dependencies]
