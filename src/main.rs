@@ -262,15 +262,21 @@ fn handle_flash_event(args: &FlashArgs, ev: api::FlashEvent) {
             if args.verbose && !args.json {
                 eprintln!("Soft reboot via serial: {port} (baud=134)");
             }
+            if args.json {
+                emit_json(&JsonEvent::status("soft_reboot").with_str("port", &port));
+            }
         }
         api::FlashEvent::SoftRebootSkipped { error } => {
             if args.verbose {
                 eprintln!("soft reboot skipped: {error}");
             }
+            if args.json {
+                emit_json(&JsonEvent::status("soft_reboot_skipped").with_str("message", &error));
+            }
         }
         api::FlashEvent::HalfKayOpen { path } => {
             if args.json {
-                emit_json(&JsonEvent::status("halfkay_open"));
+                emit_json(&JsonEvent::status("halfkay_open").with_str("path", &path));
             } else if args.verbose {
                 eprintln!("HalfKay open: {path}");
             }
