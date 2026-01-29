@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use midi_studio_loader::{api, halfkay, serial_reboot, teensy41};
+use midi_studio_loader::{api, halfkay, teensy41};
 
 const EXIT_OK: i32 = 0;
 const EXIT_NO_DEVICE: i32 = 10;
@@ -122,50 +122,64 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
         emit_json(&JsonEvent::status("reboot_start"));
     }
 
-    let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref());
-    if let Ok(port_name) = &r {
-        if args.verbose && !args.json {
-            eprintln!("Soft reboot via serial: {port_name} (baud=134)");
-        }
-    }
-    if let Err(e) = r {
-        if args.json {
-            emit_json(
-                &JsonEvent::status("error")
-                    .with_u64("code", EXIT_NO_DEVICE as u64)
-                    .with_str("message", &format!("soft reboot failed: {e}")),
-            );
-        }
-        if args.verbose {
-            eprintln!("error: soft reboot failed: {e}");
-        }
-        // Still try waiting (user may have another reboot path).
-    }
+    let opts = api::RebootOptions {
+        wait_timeout,
+        serial_port: args.serial_port.clone(),
+        ..Default::default()
+    };
 
-    let dev = match halfkay::open_halfkay_device(true, wait_timeout) {
-        Ok(d) => d,
+    match api::reboot_to_halfkay(&opts, |ev| handle_reboot_event(&args, ev)) {
+        Ok(_) => EXIT_OK,
         Err(e) => {
+            let (code, msg) = match e {
+                halfkay::HalfKayError::NoDevice => {
+                    (EXIT_NO_DEVICE, "HalfKay not found".to_string())
+                }
+                other => (EXIT_UNEXPECTED, format!("reboot failed: {other}")),
+            };
+
             if args.json {
                 emit_json(
                     &JsonEvent::status("error")
-                        .with_u64("code", EXIT_NO_DEVICE as u64)
-                        .with_str("message", &format!("HalfKay not found: {e}")),
+                        .with_u64("code", code as u64)
+                        .with_str("message", &msg),
                 );
             }
-            if args.verbose {
-                eprintln!("error: HalfKay not found: {e}");
+            if args.verbose || !args.json {
+                eprintln!("error: {msg}");
             }
-            return EXIT_NO_DEVICE;
+            code
         }
-    };
-
-    if args.json {
-        emit_json(&JsonEvent::status("halfkay_open").with_str("path", &dev.path));
-    } else {
-        eprintln!("HalfKay open: {}", dev.path);
     }
+}
 
-    EXIT_OK
+fn handle_reboot_event(args: &RebootArgs, ev: api::RebootEvent) {
+    match ev {
+        api::RebootEvent::SoftReboot { port } => {
+            if args.verbose && !args.json {
+                eprintln!("Soft reboot via serial: {port} (baud=134)");
+            }
+            if args.json {
+                emit_json(&JsonEvent::status("soft_reboot").with_str("port", &port));
+            }
+        }
+        api::RebootEvent::SoftRebootSkipped { error } => {
+            if args.verbose {
+                eprintln!("soft reboot skipped: {error}");
+            }
+            if args.json {
+                emit_json(&JsonEvent::status("soft_reboot_skipped").with_str("message", &error));
+            }
+        }
+        api::RebootEvent::HalfKayOpen { path } => {
+            if args.json {
+                emit_json(&JsonEvent::status("halfkay_open").with_str("path", &path));
+            } else {
+                eprintln!("HalfKay open: {path}");
+            }
+        }
+        api::RebootEvent::Done => {}
+    }
 }
 
 fn cmd_list(args: ListArgs) -> i32 {

@@ -6,6 +6,33 @@ use thiserror::Error;
 use crate::{halfkay, hex, serial_reboot, teensy41};
 
 #[derive(Debug, Clone)]
+pub struct RebootOptions {
+    pub wait_timeout: Option<Duration>,
+    pub serial_port: Option<String>,
+    pub soft_reboot: bool,
+    pub soft_reboot_delay: Duration,
+}
+
+impl Default for RebootOptions {
+    fn default() -> Self {
+        Self {
+            wait_timeout: Some(Duration::from_secs(60)),
+            serial_port: None,
+            soft_reboot: true,
+            soft_reboot_delay: Duration::from_millis(250),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RebootEvent {
+    SoftReboot { port: String },
+    SoftRebootSkipped { error: String },
+    HalfKayOpen { path: String },
+    Done,
+}
+
+#[derive(Debug, Clone)]
 pub struct FlashOptions {
     pub wait: bool,
     pub wait_timeout: Option<Duration>,
@@ -213,4 +240,33 @@ where
 
     on_event(FlashEvent::Done);
     Ok(())
+}
+
+pub fn reboot_to_halfkay<F>(
+    opts: &RebootOptions,
+    mut on_event: F,
+) -> Result<String, halfkay::HalfKayError>
+where
+    F: FnMut(RebootEvent),
+{
+    if opts.soft_reboot {
+        match serial_reboot::soft_reboot_teensy41(opts.serial_port.as_deref()) {
+            Ok(port) => {
+                on_event(RebootEvent::SoftReboot { port });
+                std::thread::sleep(opts.soft_reboot_delay);
+            }
+            Err(e) => {
+                on_event(RebootEvent::SoftRebootSkipped {
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    let dev = halfkay::open_halfkay_device(true, opts.wait_timeout)?;
+    on_event(RebootEvent::HalfKayOpen {
+        path: dev.path.clone(),
+    });
+    on_event(RebootEvent::Done);
+    Ok(dev.path)
 }
