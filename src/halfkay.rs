@@ -117,7 +117,7 @@ pub fn write_block_teensy41(
     dev: &HalfKayDevice,
     fw: &FirmwareImage,
     block_addr: usize,
-    write_index: usize,
+    _write_index: usize,
 ) -> Result<(), HalfKayError> {
     let end = block_addr + teensy41::BLOCK_SIZE;
     let report = build_block_report_teensy41(block_addr, &fw.data[block_addr..end]);
@@ -140,7 +140,7 @@ pub fn write_block_teensy41(
             // Match PJRC teensy_loader_cli behavior:
             // - first few blocks may take a long time (erase)
             // - later blocks should be fast
-            let total_timeout_ms = if write_index <= 4 { 45_000 } else { 500 };
+            let total_timeout_ms = if _write_index <= 4 { 45_000 } else { 500 };
             h.write_report(&report, total_timeout_ms)
         }
     }
