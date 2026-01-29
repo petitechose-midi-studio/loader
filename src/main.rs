@@ -4,10 +4,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-mod halfkay;
-mod hex;
-mod serial_reboot;
-mod teensy41;
+use midi_studio_loader::{halfkay, hex, serial_reboot, teensy41};
 
 const EXIT_OK: i32 = 0;
 const EXIT_NO_DEVICE: i32 = 10;
