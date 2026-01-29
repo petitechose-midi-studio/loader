@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 use hidapi::HidApi;
 #[cfg(not(windows))]
 use hidapi::HidDevice;
+#[cfg(not(windows))]
+use std::ffi::CString;
 use thiserror::Error;
 
 use crate::{hex::FirmwareImage, teensy41};
@@ -48,6 +50,9 @@ pub enum HalfKayError {
     #[error("short write: {got} != {expected}")]
     ShortWrite { got: usize, expected: usize },
 
+    #[error("invalid HID path")]
+    InvalidPath,
+
     #[error("no HalfKay device found")]
     NoDevice,
 }
@@ -65,6 +70,40 @@ pub fn list_devices() -> Result<Vec<HalfKayDeviceSummary>, HalfKayError> {
         }
     }
     Ok(out)
+}
+
+pub fn list_paths() -> Result<Vec<String>, HalfKayError> {
+    let api = HidApi::new()?;
+    let mut out: Vec<String> = Vec::new();
+    for d in api.device_list() {
+        if d.vendor_id() == teensy41::VID && d.product_id() == teensy41::PID_HALFKAY {
+            out.push(d.path().to_string_lossy().to_string());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+pub fn open_by_path(path: &str) -> Result<HalfKayDevice, HalfKayError> {
+    #[cfg(not(windows))]
+    {
+        let api = HidApi::new()?;
+        let cpath = CString::new(path).map_err(|_| HalfKayError::InvalidPath)?;
+        let dev = api.open_path(&cpath)?;
+        Ok(HalfKayDevice {
+            backend: Backend::HidApi(dev),
+            path: path.to_string(),
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        let dev = Win32HalfKayDevice::open_hid_path(path)?;
+        Ok(HalfKayDevice {
+            backend: Backend::Win32(dev),
+            path: path.to_string(),
+        })
+    }
 }
 
 pub fn open_halfkay_device(

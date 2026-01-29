@@ -1,5 +1,8 @@
 pub mod api;
+pub mod bootloader;
 pub mod halfkay;
 pub mod hex;
+pub mod selector;
 pub mod serial_reboot;
+pub mod targets;
 pub mod teensy41;
