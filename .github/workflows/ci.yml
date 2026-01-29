@@ -39,5 +39,11 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Test (lib only)
+        run: cargo test --no-default-features
+
+      - name: Build (lib only)
+        run: cargo build --no-default-features --lib
+
       - name: Build (release)
         run: cargo build --release
