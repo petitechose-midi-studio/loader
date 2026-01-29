@@ -1,41 +1,17 @@
 use std::time::{Duration, Instant};
 
+use hidapi::HidApi;
+#[cfg(not(windows))]
+use hidapi::HidDevice;
 use thiserror::Error;
 
-use crate::hex::FirmwareImage;
-use crate::teensy41;
-
-#[cfg(not(windows))]
-use hidapi::{HidApi, HidDevice};
+use crate::{hex::FirmwareImage, teensy41};
 
 #[cfg(windows)]
-use hidapi::HidApi;
+mod win32;
 
 #[cfg(windows)]
-use std::ffi::OsStr;
-
-#[cfg(windows)]
-use std::iter;
-
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
-
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
-
-#[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-
-#[cfg(windows)]
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use win32::Win32HalfKayDevice;
 
 #[derive(serde::Serialize)]
 pub struct HalfKayDeviceSummary {
@@ -45,17 +21,15 @@ pub struct HalfKayDeviceSummary {
 }
 
 pub struct HalfKayDevice {
-    #[cfg(not(windows))]
-    _api: HidApi,
-    #[cfg(not(windows))]
-    dev: HidDevice,
-
-    #[cfg(windows)]
-    handle: HANDLE,
-    #[cfg(windows)]
-    event: HANDLE,
-
+    backend: Backend,
     pub path: String,
+}
+
+enum Backend {
+    #[cfg(not(windows))]
+    HidApi(HidDevice),
+    #[cfg(windows)]
+    Win32(Win32HalfKayDevice),
 }
 
 #[derive(Error, Debug)]
@@ -64,8 +38,15 @@ pub enum HalfKayError {
     Hid(#[from] hidapi::HidError),
 
     #[cfg(windows)]
-    #[error("win32: {msg} (err={code})")]
-    Win32 { msg: &'static str, code: u32 },
+    #[error("win32: {msg} (err={code}): {detail}")]
+    Win32 {
+        msg: &'static str,
+        code: u32,
+        detail: String,
+    },
+
+    #[error("short write: {got} != {expected}")]
+    ShortWrite { got: usize, expected: usize },
 
     #[error("no HalfKay device found")]
     NoDevice,
@@ -94,28 +75,27 @@ pub fn open_halfkay_device(
     loop {
         let api = HidApi::new()?;
 
-        let path = api
+        let dev = api
             .device_list()
-            .find(|d| d.vendor_id() == teensy41::VID && d.product_id() == teensy41::PID_HALFKAY)
-            .map(|d| d.path().to_string_lossy().to_string());
+            .find(|d| d.vendor_id() == teensy41::VID && d.product_id() == teensy41::PID_HALFKAY);
 
-        if let Some(path) = path {
+        if let Some(dev) = dev {
+            let path = dev.path().to_string_lossy().to_string();
+
             #[cfg(not(windows))]
             {
-                let dev = api.open(teensy41::VID, teensy41::PID_HALFKAY)?;
+                let dev = api.open_path(dev.path())?;
                 return Ok(HalfKayDevice {
-                    _api: api,
-                    dev,
+                    backend: Backend::HidApi(dev),
                     path,
                 });
             }
 
             #[cfg(windows)]
             {
-                let (handle, event) = win32_open_hid_path(&path)?;
+                let dev = Win32HalfKayDevice::open_hid_path(&path)?;
                 return Ok(HalfKayDevice {
-                    handle,
-                    event,
+                    backend: Backend::Win32(dev),
                     path,
                 });
             }
@@ -142,19 +122,27 @@ pub fn write_block_teensy41(
     let end = block_addr + teensy41::BLOCK_SIZE;
     let report = build_block_report_teensy41(block_addr, &fw.data[block_addr..end]);
 
-    #[cfg(not(windows))]
-    {
-        let _ = dev.dev.write(&report)?;
-        return Ok(());
-    }
+    match &dev.backend {
+        #[cfg(not(windows))]
+        Backend::HidApi(h) => {
+            let n = h.write(&report)?;
+            if n != report.len() {
+                return Err(HalfKayError::ShortWrite {
+                    got: n,
+                    expected: report.len(),
+                });
+            }
+            Ok(())
+        }
 
-    #[cfg(windows)]
-    {
-        // Match PJRC teensy_loader_cli behavior:
-        // - first few blocks may take a long time (erase)
-        // - later blocks should be fast
-        let total_timeout_ms = if write_index <= 4 { 45_000 } else { 500 };
-        win32_write_report(dev.handle, dev.event, &report, total_timeout_ms)
+        #[cfg(windows)]
+        Backend::Win32(h) => {
+            // Match PJRC teensy_loader_cli behavior:
+            // - first few blocks may take a long time (erase)
+            // - later blocks should be fast
+            let total_timeout_ms = if write_index <= 4 { 45_000 } else { 500 };
+            h.write_report(&report, total_timeout_ms)
+        }
     }
 }
 
@@ -162,16 +150,18 @@ pub fn boot_teensy41(dev: &HalfKayDevice) -> Result<(), HalfKayError> {
     let report = build_boot_report_teensy41();
 
     // Best-effort: boot may happen immediately and invalidate the handle.
-    #[cfg(not(windows))]
-    {
-        let _ = dev.dev.write(&report);
-        Ok(())
-    }
+    match &dev.backend {
+        #[cfg(not(windows))]
+        Backend::HidApi(h) => {
+            let _ = h.write(&report);
+            Ok(())
+        }
 
-    #[cfg(windows)]
-    {
-        let _ = win32_write_report(dev.handle, dev.event, &report, 500);
-        Ok(())
+        #[cfg(windows)]
+        Backend::Win32(h) => {
+            let _ = h.write_report(&report, 500);
+            Ok(())
+        }
     }
 }
 
@@ -200,156 +190,6 @@ pub fn build_boot_report_teensy41() -> Vec<u8> {
     pkt[1] = 0xFF;
     pkt[2] = 0xFF;
     report
-}
-
-#[cfg(windows)]
-fn win32_open_hid_path(path: &str) -> Result<(HANDLE, HANDLE), HalfKayError> {
-    let wide: Vec<u16> = OsStr::new(path)
-        .encode_wide()
-        .chain(iter::once(0))
-        .collect();
-
-    // Manual-reset event, initial state signaled (matches PJRC teensy_loader_cli).
-    let event = unsafe { CreateEventW(std::ptr::null(), 1, 1, std::ptr::null()) };
-    if event == 0 {
-        return Err(HalfKayError::Win32 {
-            msg: "CreateEventW",
-            code: unsafe { GetLastError() },
-        });
-    }
-
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED,
-            0,
-        )
-    };
-
-    if handle == INVALID_HANDLE_VALUE {
-        unsafe { CloseHandle(event) };
-        return Err(HalfKayError::Win32 {
-            msg: "CreateFileW",
-            code: unsafe { GetLastError() },
-        });
-    }
-
-    Ok((handle, event))
-}
-
-#[cfg(windows)]
-fn win32_write_report(
-    handle: HANDLE,
-    event: HANDLE,
-    report: &[u8],
-    total_timeout_ms: u32,
-) -> Result<(), HalfKayError> {
-    let start = Instant::now();
-    let mut last_msg: &'static str = "WriteFile timeout";
-    let mut last_code: u32 = WAIT_TIMEOUT;
-
-    loop {
-        let elapsed_ms: u32 = start.elapsed().as_millis().try_into().unwrap_or(u32::MAX);
-        if elapsed_ms >= total_timeout_ms {
-            return Err(HalfKayError::Win32 {
-                msg: last_msg,
-                code: last_code,
-            });
-        }
-
-        let remaining_ms = total_timeout_ms - elapsed_ms;
-        match win32_write_report_once(handle, event, report, remaining_ms) {
-            Ok(()) => return Ok(()),
-            Err(HalfKayError::Win32 { msg, code }) => {
-                last_msg = msg;
-                last_code = code;
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-#[cfg(windows)]
-fn win32_write_report_once(
-    handle: HANDLE,
-    event: HANDLE,
-    report: &[u8],
-    timeout_ms: u32,
-) -> Result<(), HalfKayError> {
-    unsafe {
-        ResetEvent(event);
-        let mut ov: OVERLAPPED = std::mem::zeroed();
-        ov.hEvent = event;
-
-        let ok = WriteFile(
-            handle,
-            report.as_ptr() as _,
-            report.len() as u32,
-            std::ptr::null_mut(),
-            &mut ov as *mut OVERLAPPED,
-        );
-
-        if ok == 0 {
-            let err = GetLastError();
-            // ERROR_IO_PENDING = 997
-            if err != 997 {
-                return Err(HalfKayError::Win32 {
-                    msg: "WriteFile",
-                    code: err,
-                });
-            }
-
-            let r = WaitForSingleObject(event, timeout_ms);
-            if r == WAIT_TIMEOUT {
-                let _ = CancelIoEx(handle, &mut ov as *mut OVERLAPPED);
-                return Err(HalfKayError::Win32 {
-                    msg: "WriteFile timeout",
-                    code: WAIT_TIMEOUT,
-                });
-            }
-            if r != WAIT_OBJECT_0 {
-                return Err(HalfKayError::Win32 {
-                    msg: "WaitForSingleObject",
-                    code: r,
-                });
-            }
-        }
-
-        let mut n: u32 = 0;
-        let ok2 = GetOverlappedResult(handle, &mut ov as *mut OVERLAPPED, &mut n, 0);
-        if ok2 == 0 {
-            return Err(HalfKayError::Win32 {
-                msg: "GetOverlappedResult",
-                code: GetLastError(),
-            });
-        }
-        if n == 0 {
-            return Err(HalfKayError::Win32 {
-                msg: "short write",
-                code: 0,
-            });
-        }
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-impl Drop for HalfKayDevice {
-    fn drop(&mut self) {
-        unsafe {
-            if self.handle != 0 && self.handle != INVALID_HANDLE_VALUE {
-                let _ = CloseHandle(self.handle);
-            }
-            if self.event != 0 {
-                let _ = CloseHandle(self.event);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
