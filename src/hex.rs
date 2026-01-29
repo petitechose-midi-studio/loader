@@ -204,3 +204,85 @@ fn checksum_ihex(bytes: &[u8]) -> u8 {
     let sum: u8 = bytes.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
     (!sum).wrapping_add(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::NamedTempFile;
+
+    fn ihex_record(addr: u16, rec_type: u8, payload: &[u8]) -> String {
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.push(payload.len() as u8);
+        bytes.extend_from_slice(&addr.to_be_bytes());
+        bytes.push(rec_type);
+        bytes.extend_from_slice(payload);
+        let cksum = checksum_ihex(&bytes);
+        bytes.push(cksum);
+
+        let mut s = String::from(":");
+        for b in bytes {
+            s.push_str(&format!("{b:02X}"));
+        }
+        s
+    }
+
+    #[test]
+    fn test_load_teensy41_maps_flexspi_base() {
+        // Set extended linear address = 0x6000 -> 0x60000000 (FlexSPI base)
+        let ext = ihex_record(0x0000, 0x04, &[0x60, 0x00]);
+        let data = ihex_record(0x0010, 0x00, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        let eof = ihex_record(0x0000, 0x01, &[]);
+
+        let content = format!("{ext}\n{data}\n{eof}\n");
+        let mut f = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, content.as_bytes()).unwrap();
+
+        let fw = FirmwareImage::load_teensy41(f.path()).unwrap();
+        assert_eq!(fw.data[0x10], 0xDE);
+        assert_eq!(fw.data[0x11], 0xAD);
+        assert_eq!(fw.data[0x12], 0xBE);
+        assert_eq!(fw.data[0x13], 0xEF);
+        assert!(fw.blocks_to_write.contains(&0));
+    }
+
+    #[test]
+    fn test_load_teensy41_rejects_out_of_range_address() {
+        // ext linear address = 0x607C -> 0x607C0000 (just beyond FlexSPI mapped range)
+        let ext = ihex_record(0x0000, 0x04, &[0x60, 0x7C]);
+        let data = ihex_record(0x0000, 0x00, &[0x01]);
+        let eof = ihex_record(0x0000, 0x01, &[]);
+
+        let content = format!("{ext}\n{data}\n{eof}\n");
+        let mut f = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, content.as_bytes()).unwrap();
+
+        let err = match FirmwareImage::load_teensy41(f.path()) {
+            Ok(_) => panic!("expected AddressOutOfRange"),
+            Err(e) => e,
+        };
+        match err {
+            HexError::AddressOutOfRange { .. } => {}
+            _ => panic!("expected AddressOutOfRange, got {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_load_teensy41_detects_bad_checksum() {
+        // Record with wrong checksum (last byte '00')
+        let bad = ":04001000DEADBEEF00".to_string();
+        let eof = ihex_record(0x0000, 0x01, &[]);
+        let content = format!("{bad}\n{eof}\n");
+        let mut f = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, content.as_bytes()).unwrap();
+
+        let err = match FirmwareImage::load_teensy41(f.path()) {
+            Ok(_) => panic!("expected InvalidChecksum"),
+            Err(e) => e,
+        };
+        match err {
+            HexError::InvalidChecksum { .. } => {}
+            _ => panic!("expected InvalidChecksum, got {err:?}"),
+        }
+    }
+}

@@ -88,20 +88,8 @@ pub fn write_block_teensy41(
     fw: &FirmwareImage,
     block_addr: usize,
 ) -> Result<(), HalfKayError> {
-    let mut report = vec![0u8; teensy41::PACKET_SIZE + 1];
-    let pkt = &mut report[1..];
-
-    let addr = block_addr as u32;
-    pkt[0] = (addr & 0xFF) as u8;
-    pkt[1] = ((addr >> 8) & 0xFF) as u8;
-    pkt[2] = ((addr >> 16) & 0xFF) as u8;
-    for b in &mut pkt[3..teensy41::HEADER_SIZE] {
-        *b = 0;
-    }
-
     let end = block_addr + teensy41::BLOCK_SIZE;
-    pkt[teensy41::HEADER_SIZE..].copy_from_slice(&fw.data[block_addr..end]);
-
+    let report = build_block_report_teensy41(block_addr, &fw.data[block_addr..end]);
     let n = dev.dev.write(&report)?;
     if n != report.len() {
         return Err(HalfKayError::ShortWrite {
@@ -113,12 +101,82 @@ pub fn write_block_teensy41(
 }
 
 pub fn boot_teensy41(dev: &HalfKayDevice) -> Result<(), HalfKayError> {
+    let report = build_boot_report_teensy41();
+    let _ = dev.dev.write(&report)?;
+    Ok(())
+}
+
+pub fn build_block_report_teensy41(block_addr: usize, data: &[u8]) -> Vec<u8> {
+    assert_eq!(data.len(), teensy41::BLOCK_SIZE);
+
+    // First byte is Report ID (0).
+    let mut report = vec![0u8; teensy41::PACKET_SIZE + 1];
+    let pkt = &mut report[1..];
+
+    let addr = block_addr as u32;
+    pkt[0] = (addr & 0xFF) as u8;
+    pkt[1] = ((addr >> 8) & 0xFF) as u8;
+    pkt[2] = ((addr >> 16) & 0xFF) as u8;
+    for b in &mut pkt[3..teensy41::HEADER_SIZE] {
+        *b = 0;
+    }
+    pkt[teensy41::HEADER_SIZE..].copy_from_slice(data);
+    report
+}
+
+pub fn build_boot_report_teensy41() -> Vec<u8> {
     let mut report = vec![0u8; teensy41::PACKET_SIZE + 1];
     let pkt = &mut report[1..];
     pkt[0] = 0xFF;
     pkt[1] = 0xFF;
     pkt[2] = 0xFF;
-    // Remaining bytes are already zero.
-    let _ = dev.dev.write(&report)?;
-    Ok(())
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_block_report_format() {
+        let block_addr = 0x0012_3400usize;
+        let mut data = vec![0u8; teensy41::BLOCK_SIZE];
+        data[0] = 0xAA;
+        data[1] = 0xBB;
+        data[teensy41::BLOCK_SIZE - 1] = 0xCC;
+
+        let report = build_block_report_teensy41(block_addr, &data);
+        assert_eq!(report.len(), teensy41::PACKET_SIZE + 1);
+        assert_eq!(report[0], 0);
+
+        // addr bytes (little endian 24-bit)
+        assert_eq!(report[1], 0x00);
+        assert_eq!(report[2], 0x34);
+        assert_eq!(report[3], 0x12);
+
+        // padding is zero
+        for b in &report[4..(1 + teensy41::HEADER_SIZE)] {
+            assert_eq!(*b, 0);
+        }
+
+        // payload
+        let payload = &report[(1 + teensy41::HEADER_SIZE)..];
+        assert_eq!(payload.len(), teensy41::BLOCK_SIZE);
+        assert_eq!(payload[0], 0xAA);
+        assert_eq!(payload[1], 0xBB);
+        assert_eq!(payload[teensy41::BLOCK_SIZE - 1], 0xCC);
+    }
+
+    #[test]
+    fn test_boot_report_format() {
+        let report = build_boot_report_teensy41();
+        assert_eq!(report.len(), teensy41::PACKET_SIZE + 1);
+        assert_eq!(report[0], 0);
+        assert_eq!(report[1], 0xFF);
+        assert_eq!(report[2], 0xFF);
+        assert_eq!(report[3], 0xFF);
+        for b in &report[4..] {
+            assert_eq!(*b, 0);
+        }
+    }
 }
