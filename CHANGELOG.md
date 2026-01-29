@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2
+
+- Fix the GitHub Actions Intel macOS runner label in the release workflow.
+
 ## v0.1.1
 
 - Build macOS ARM64 and X64 release artifacts.
