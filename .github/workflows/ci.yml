@@ -42,6 +42,9 @@ jobs:
       - name: Test (lib only)
         run: cargo test --no-default-features
 
+      - name: Clippy (lib only)
+        run: cargo clippy --no-default-features --lib -- -D warnings
+
       - name: Build (lib only)
         run: cargo build --no-default-features --lib
 
