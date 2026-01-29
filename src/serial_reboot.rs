@@ -11,10 +11,7 @@ pub enum SerialRebootError {
     Serial(String),
 }
 
-pub fn soft_reboot_teensy41(
-    preferred_port: Option<&str>,
-    verbose: bool,
-) -> Result<(), SerialRebootError> {
+pub fn soft_reboot_teensy41(preferred_port: Option<&str>) -> Result<String, SerialRebootError> {
     let ports =
         serialport::available_ports().map_err(|e| SerialRebootError::Serial(e.to_string()))?;
     let mut candidates: Vec<String> = Vec::new();
@@ -37,10 +34,6 @@ pub fn soft_reboot_teensy41(
             .ok_or(SerialRebootError::NoTeensySerial)?
     };
 
-    if verbose {
-        eprintln!("Soft reboot via serial: {port_name} (baud=134)");
-    }
-
     // The Teensyduino "134 baud" mechanism: setting line coding to 134 triggers reboot.
     // We only need to open the port and apply settings.
     let builder = serialport::new(&port_name, 134)
@@ -59,5 +52,5 @@ pub fn soft_reboot_teensy41(
     std::thread::sleep(Duration::from_millis(120));
     drop(port);
 
-    Ok(())
+    Ok(port_name)
 }

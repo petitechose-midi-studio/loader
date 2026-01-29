@@ -122,7 +122,12 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
         emit_json(&JsonEvent::status("reboot_start"));
     }
 
-    let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref(), args.verbose);
+    let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref());
+    if let Ok(port_name) = &r {
+        if args.verbose && !args.json {
+            eprintln!("Soft reboot via serial: {port_name} (baud=134)");
+        }
+    }
     if let Err(e) = r {
         if args.json {
             emit_json(
@@ -244,8 +249,12 @@ fn run_flash(args: &FlashArgs, wait_timeout: Option<Duration>) -> Result<(), Fla
             // Best-effort reboot path: if user asked to wait, we can try to enter
             // bootloader without the physical button.
             if args.wait || args.soft_reboot {
-                let r =
-                    serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref(), args.verbose);
+                let r = serial_reboot::soft_reboot_teensy41(args.serial_port.as_deref());
+                if let Ok(port_name) = &r {
+                    if args.verbose && !args.json {
+                        eprintln!("Soft reboot via serial: {port_name} (baud=134)");
+                    }
+                }
                 if let Err(e) = r {
                     if args.verbose {
                         eprintln!("soft reboot skipped: {e}");
