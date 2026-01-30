@@ -15,7 +15,7 @@ use crate::{
 pub enum FlashSelection {
     Auto,
     All,
-    Device(String),
+    Device(selector::TargetSelector),
 }
 
 #[derive(Debug, Clone)]
@@ -283,15 +283,10 @@ where
         FlashSelection::All => targets.to_vec(),
 
         FlashSelection::Device(sel) => {
-            let parsed =
-                selector::parse_selector(&sel).map_err(|e| FlashError::AmbiguousTarget {
+            let idx =
+                selector::resolve_one(&sel, targets).map_err(|e| FlashError::AmbiguousTarget {
                     message: e.to_string(),
                 })?;
-            let idx = selector::resolve_one(&parsed, targets).map_err(|e| {
-                FlashError::AmbiguousTarget {
-                    message: e.to_string(),
-                }
-            })?;
             vec![targets[idx].clone()]
         }
 

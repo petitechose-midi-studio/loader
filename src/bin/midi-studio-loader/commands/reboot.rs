@@ -1,3 +1,4 @@
+use midi_studio_loader::selector;
 use midi_studio_loader::{api, reboot_api};
 
 use crate::cli;
@@ -9,7 +10,17 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
     let selection = if args.all {
         api::FlashSelection::All
     } else if let Some(sel) = args.device.clone() {
-        api::FlashSelection::Device(sel)
+        match selector::parse_selector(&sel) {
+            Ok(s) => api::FlashSelection::Device(s),
+            Err(e) => {
+                out.emit(Event::Error {
+                    code: exit_codes::EXIT_AMBIGUOUS,
+                    message: e.to_string(),
+                });
+                out.emit(Event::HintAmbiguousTargets);
+                return exit_codes::EXIT_AMBIGUOUS;
+            }
+        }
     } else {
         api::FlashSelection::Auto
     };
