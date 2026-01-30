@@ -255,7 +255,13 @@ where
     });
 
     let targets = discover_targets_for_flash(opts, &mut on_event)?;
-    let selected = select_targets(selection, opts, &targets, &mut on_event)?;
+    let selected = select_targets(
+        selection,
+        opts.serial_port.as_deref(),
+        &targets,
+        true,
+        &mut on_event,
+    )?;
     let needs_serial = selected.iter().any(|t| t.kind() == TargetKind::Serial);
 
     Ok(FlashPlan {
@@ -401,10 +407,11 @@ where
     }
 }
 
-fn select_targets<F>(
+pub(crate) fn select_targets<F>(
     selection: FlashSelection,
-    opts: &FlashOptions,
+    serial_port: Option<&str>,
     targets: &[Target],
+    emit_selected_event: bool,
     on_event: &mut F,
 ) -> Result<Vec<Target>, FlashError>
 where
@@ -454,7 +461,7 @@ where
                         halfkay.len()
                     ),
                 });
-            } else if let Some(port) = opts.serial_port.as_deref() {
+            } else if let Some(port) = serial_port {
                 let matches: Vec<Target> = serial
                     .iter()
                     .filter_map(|t| match t {
@@ -486,7 +493,7 @@ where
         }
     };
 
-    if selected.len() == 1 {
+    if emit_selected_event && selected.len() == 1 {
         on_event(FlashEvent::TargetSelected {
             target_id: selected[0].id(),
         });
@@ -647,5 +654,84 @@ fn reopen_halfkay_by_path(
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::targets::{HalfKayTarget, SerialTarget};
+
+    fn serial(port: &str) -> Target {
+        Target::Serial(SerialTarget {
+            port_name: port.to_string(),
+            vid: 0x16C0,
+            pid: 0x0483,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        })
+    }
+
+    fn halfkay(path: &str) -> Target {
+        Target::HalfKay(HalfKayTarget {
+            vid: 0x16C0,
+            pid: 0x0478,
+            path: path.to_string(),
+        })
+    }
+
+    #[test]
+    fn select_targets_auto_prefers_single_halfkay() {
+        let targets = vec![serial("COM5"), halfkay("HK1"), serial("COM6")];
+        let mut events: Vec<FlashEvent> = Vec::new();
+
+        let selected = select_targets(FlashSelection::Auto, None, &targets, true, &mut |e| {
+            events.push(e)
+        })
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), "halfkay:HK1");
+        assert!(events.iter().any(
+            |e| matches!(e, FlashEvent::TargetSelected { target_id } if target_id == "halfkay:HK1")
+        ));
+    }
+
+    #[test]
+    fn select_targets_auto_prefers_named_serial_port() {
+        let targets = vec![serial("COM5"), serial("COM6")];
+        let mut events: Vec<FlashEvent> = Vec::new();
+
+        let selected = select_targets(
+            FlashSelection::Auto,
+            Some("COM6"),
+            &targets,
+            true,
+            &mut |e| events.push(e),
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), "serial:COM6");
+        assert!(events.iter().any(
+            |e| matches!(e, FlashEvent::TargetSelected { target_id } if target_id == "serial:COM6")
+        ));
+    }
+
+    #[test]
+    fn select_targets_does_not_emit_selected_when_disabled() {
+        let targets = vec![serial("COM6")];
+        let mut events: Vec<FlashEvent> = Vec::new();
+
+        let selected = select_targets(FlashSelection::Auto, None, &targets, false, &mut |e| {
+            events.push(e)
+        })
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, FlashEvent::TargetSelected { .. })));
     }
 }
