@@ -8,6 +8,7 @@ pub const PJRC_VID: u16 = teensy41::VID;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
+    #[serde(rename = "halfkay")]
     HalfKay,
     Serial,
 }
@@ -15,6 +16,7 @@ pub enum TargetKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Target {
+    #[serde(rename = "halfkay")]
     HalfKay(HalfKayTarget),
     Serial(SerialTarget),
 }

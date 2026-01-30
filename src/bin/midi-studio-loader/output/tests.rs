@@ -9,7 +9,7 @@ use midi_studio_loader::targets::{self, HalfKayTarget, SerialTarget, TargetKind}
 
 use super::human::HumanOutput;
 use super::json::JsonOutput;
-use crate::output::OutputOptions;
+use crate::output::{JsonProgressMode, OutputOptions};
 
 fn keys(v: &serde_json::Value) -> BTreeSet<String> {
     v.as_object()
@@ -60,6 +60,7 @@ fn json_timestamps_add_t_ms_when_enabled() {
         verbose: false,
         quiet: false,
         json_timestamps: true,
+        json_progress: JsonProgressMode::Blocks,
     });
 
     let s = out.render_event_json(super::json::operation_event_to_json(
@@ -72,6 +73,7 @@ fn json_timestamps_add_t_ms_when_enabled() {
         verbose: false,
         quiet: false,
         json_timestamps: false,
+        json_progress: JsonProgressMode::Blocks,
     });
     let s2 = out2.render_event_json(super::json::operation_event_to_json(
         OperationEvent::DiscoverStart,
@@ -401,6 +403,18 @@ fn list_target_json_includes_index_and_id() {
     let v = super::target_to_value(0, &t);
     assert_eq!(v.get("index").and_then(|v| v.as_u64()), Some(0));
     assert_eq!(v.get("id").and_then(|v| v.as_str()), Some("serial:COM6"));
+}
+
+#[test]
+fn list_target_json_kind_is_halfkay() {
+    let t = targets::Target::HalfKay(HalfKayTarget {
+        vid: 0x16C0,
+        pid: 0x0478,
+        path: "HK".to_string(),
+    });
+
+    let v = super::target_to_value(0, &t);
+    assert_eq!(v.get("kind").and_then(|v| v.as_str()), Some("halfkay"));
 }
 
 #[test]

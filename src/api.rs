@@ -80,7 +80,10 @@ pub enum FlashError {
     #[error("no target device found")]
     NoTargets,
 
-    #[error("ambiguous target: {message}")]
+    #[error("target not found: {selector}{hint}")]
+    TargetNotFound { selector: String, hint: String },
+
+    #[error("target selection failed: {message}")]
     AmbiguousTarget { message: String },
 
     #[error("target discovery failed: {source}")]
@@ -136,6 +139,7 @@ impl FlashError {
     pub fn kind(&self) -> FlashErrorKind {
         match self {
             FlashError::NoTargets => FlashErrorKind::NoDevice,
+            FlashError::TargetNotFound { .. } => FlashErrorKind::NoDevice,
             FlashError::AmbiguousTarget { .. } => FlashErrorKind::AmbiguousTarget,
             FlashError::DiscoveryFailed { .. } => FlashErrorKind::Unexpected,
             FlashError::InvalidHex { .. } => FlashErrorKind::InvalidHex,
@@ -317,10 +321,32 @@ where
         FlashSelection::All => targets.to_vec(),
 
         FlashSelection::Device(sel) => {
-            let idx =
-                selector::resolve_one(&sel, targets).map_err(|e| FlashError::AmbiguousTarget {
-                    message: e.to_string(),
-                })?;
+            let idx = match selector::resolve_one(&sel, targets) {
+                Ok(idx) => idx,
+                Err(selector::SelectorError::NoMatch { selector }) => {
+                    let halfkay_count = halfkay.len();
+
+                    let hint = if selector.starts_with("serial:") && halfkay_count > 0 {
+                        if halfkay_count == 1 {
+                            ". Hint: HalfKay bootloader detected; try --device index:0, or run `midi-studio-loader list`."
+                        } else {
+                            ". Hint: HalfKay bootloaders detected; try --device index:<n>, or run `midi-studio-loader list`."
+                        }
+                    } else {
+                        ". Hint: run `midi-studio-loader list`."
+                    };
+
+                    return Err(FlashError::TargetNotFound {
+                        selector,
+                        hint: hint.to_string(),
+                    });
+                }
+                Err(e) => {
+                    return Err(FlashError::AmbiguousTarget {
+                        message: format!("{}. Hint: run `midi-studio-loader list`.", e),
+                    })
+                }
+            };
             vec![targets[idx].clone()]
         }
 
@@ -346,12 +372,19 @@ where
                     .collect();
                 if matches.len() == 1 {
                     vec![matches[0].clone()]
-                } else if matches.is_empty() {
-                    return Err(FlashError::NoTargets);
-                } else {
+                } else if matches.len() > 1 {
                     return Err(FlashError::AmbiguousTarget {
                         message: format!(
                             "multiple targets matched preferred serial port {port}; use --device"
+                        ),
+                    });
+                } else if targets.len() == 1 {
+                    vec![targets[0].clone()]
+                } else {
+                    return Err(FlashError::AmbiguousTarget {
+                        message: format!(
+                            "preferred serial port {port} not found and multiple targets detected ({}); use --device or --all",
+                            targets.len()
                         ),
                     });
                 }

@@ -56,7 +56,10 @@ pub enum RebootError {
     #[error("no target device found")]
     NoTargets,
 
-    #[error("ambiguous target: {message}")]
+    #[error("target not found: {selector}{hint}")]
+    TargetNotFound { selector: String, hint: String },
+
+    #[error("target selection failed: {message}")]
     AmbiguousTarget { message: String },
 
     #[error("target discovery failed: {source}")]
@@ -89,6 +92,7 @@ impl RebootError {
     pub fn kind(&self) -> RebootErrorKind {
         match self {
             RebootError::NoTargets => RebootErrorKind::NoDevice,
+            RebootError::TargetNotFound { .. } => RebootErrorKind::NoDevice,
             RebootError::AmbiguousTarget { .. } => RebootErrorKind::AmbiguousTarget,
             RebootError::DiscoveryFailed { .. } => RebootErrorKind::Unexpected,
             RebootError::SoftRebootFailed { .. } => RebootErrorKind::NoDevice,
@@ -134,6 +138,9 @@ where
     )
     .map_err(|e| match e {
         crate::api::FlashError::NoTargets => RebootError::NoTargets,
+        crate::api::FlashError::TargetNotFound { selector, hint } => {
+            RebootError::TargetNotFound { selector, hint }
+        }
         crate::api::FlashError::AmbiguousTarget { message } => {
             RebootError::AmbiguousTarget { message }
         }

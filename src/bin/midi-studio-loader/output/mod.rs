@@ -13,6 +13,14 @@ pub struct OutputOptions {
     pub verbose: bool,
     pub quiet: bool,
     pub json_timestamps: bool,
+    pub json_progress: JsonProgressMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonProgressMode {
+    Blocks,
+    Percent,
+    None,
 }
 
 #[derive(Debug, Clone)]
@@ -59,10 +67,16 @@ pub trait Reporter {
 }
 
 pub fn make_for_flash(args: &cli::FlashArgs) -> Box<dyn Reporter> {
+    let json_progress = match args.json_progress {
+        cli::JsonProgressArg::Blocks => JsonProgressMode::Blocks,
+        cli::JsonProgressArg::Percent => JsonProgressMode::Percent,
+        cli::JsonProgressArg::None => JsonProgressMode::None,
+    };
     let opts = OutputOptions {
         verbose: args.verbose,
         quiet: args.quiet,
         json_timestamps: args.json_timestamps,
+        json_progress,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -76,6 +90,7 @@ pub fn make_for_reboot(args: &cli::RebootArgs) -> Box<dyn Reporter> {
         verbose: args.verbose,
         quiet: false,
         json_timestamps: args.json_timestamps,
+        json_progress: JsonProgressMode::Blocks,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -89,6 +104,7 @@ pub fn make_for_list(args: &cli::ListArgs) -> Box<dyn Reporter> {
         verbose: false,
         quiet: false,
         json_timestamps: false,
+        json_progress: JsonProgressMode::Blocks,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -102,6 +118,7 @@ pub fn make_for_doctor(args: &cli::DoctorArgs) -> Box<dyn Reporter> {
         verbose: false,
         quiet: false,
         json_timestamps: false,
+        json_progress: JsonProgressMode::Blocks,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))

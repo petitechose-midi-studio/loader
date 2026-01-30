@@ -3,7 +3,9 @@ use std::time::Instant;
 
 use midi_studio_loader::{operation::OperationEvent, targets};
 
-use crate::output::{target_to_value, DoctorReport, DryRunSummary, Event, OutputOptions, Reporter};
+use crate::output::{
+    target_to_value, DoctorReport, DryRunSummary, Event, JsonProgressMode, OutputOptions, Reporter,
+};
 
 #[derive(serde::Serialize)]
 pub struct JsonEvent {
@@ -41,6 +43,7 @@ impl JsonEvent {
 pub struct JsonOutput {
     opts: OutputOptions,
     start: Instant,
+    last_percent: Option<u64>,
 }
 
 impl JsonOutput {
@@ -48,6 +51,7 @@ impl JsonOutput {
         Self {
             opts,
             start: Instant::now(),
+            last_percent: None,
         }
     }
 }
@@ -91,7 +95,7 @@ impl JsonOutput {
 impl Reporter for JsonOutput {
     fn emit(&mut self, event: Event) {
         match event {
-            Event::Operation(ev) => self.json_event(operation_event_to_json(ev)),
+            Event::Operation(ev) => self.emit_operation(ev),
             Event::DryRun(summary) => self.json_event(dry_run_to_json(summary)),
             Event::ListTargets(targets) => {
                 for (i, t) in targets.iter().enumerate() {
@@ -105,6 +109,34 @@ impl Reporter for JsonOutput {
     }
 
     fn finish(&mut self) {}
+}
+
+impl JsonOutput {
+    fn emit_operation(&mut self, ev: OperationEvent) {
+        match &ev {
+            OperationEvent::TargetStart { .. } => {
+                self.last_percent = None;
+            }
+            OperationEvent::Block { index, total, .. } => match self.opts.json_progress {
+                JsonProgressMode::Blocks => {}
+                JsonProgressMode::None => return,
+                JsonProgressMode::Percent => {
+                    let total_u64 = (*total).max(1) as u64;
+                    let percent = ((*index + 1) as u64).saturating_mul(100) / total_u64;
+                    let should_emit = *index == 0
+                        || *index + 1 == *total
+                        || self.last_percent.map(|p| p != percent).unwrap_or(true);
+                    if !should_emit {
+                        return;
+                    }
+                    self.last_percent = Some(percent);
+                }
+            },
+            _ => {}
+        }
+
+        self.json_event(operation_event_to_json(ev));
+    }
 }
 
 pub fn dry_run_to_json(summary: DryRunSummary) -> JsonEvent {

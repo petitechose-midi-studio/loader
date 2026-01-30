@@ -11,6 +11,16 @@ pub enum BridgeMethodArg {
     None,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum JsonProgressArg {
+    /// Emit a JSON event for every written block.
+    Blocks,
+    /// Emit fewer JSON events by throttling block output to percent changes.
+    Percent,
+    /// Do not emit per-block progress events.
+    None,
+}
+
 #[derive(Parser)]
 #[command(name = "midi-studio-loader")]
 #[command(about = "Teensy 4.1 flasher CLI (HalfKay)")]
@@ -113,6 +123,14 @@ pub struct FlashArgs {
     /// Include monotonic timestamps in JSON events (milliseconds since process start).
     #[arg(long, requires = "json")]
     pub json_timestamps: bool,
+
+    /// JSON progress verbosity.
+    ///
+    /// - blocks: emit every block (most verbose)
+    /// - percent: emit fewer progress events
+    /// - none: no per-block progress events
+    #[arg(long, value_enum, default_value_t = JsonProgressArg::Blocks, requires = "json")]
+    pub json_progress: JsonProgressArg,
 
     /// Validate inputs and selection without flashing.
     #[arg(long)]

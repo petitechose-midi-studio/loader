@@ -57,7 +57,12 @@ pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
                 code,
                 message: e.to_string(),
             });
-            if code == exit_codes::EXIT_AMBIGUOUS {
+            if matches!(
+                e,
+                api::FlashError::NoTargets
+                    | api::FlashError::TargetNotFound { .. }
+                    | api::FlashError::AmbiguousTarget { .. }
+            ) {
                 out.emit(Event::HintAmbiguousTargets);
             }
             code
@@ -94,7 +99,12 @@ fn dry_run(
                 code,
                 message: e.to_string(),
             });
-            if code == exit_codes::EXIT_AMBIGUOUS {
+            if matches!(
+                e,
+                api::FlashError::NoTargets
+                    | api::FlashError::TargetNotFound { .. }
+                    | api::FlashError::AmbiguousTarget { .. }
+            ) {
                 out.emit(Event::HintAmbiguousTargets);
             }
             code

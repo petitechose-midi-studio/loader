@@ -47,7 +47,12 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
                 code,
                 message: e.to_string(),
             });
-            if code == exit_codes::EXIT_AMBIGUOUS {
+            if matches!(
+                e,
+                reboot_api::RebootError::NoTargets
+                    | reboot_api::RebootError::TargetNotFound { .. }
+                    | reboot_api::RebootError::AmbiguousTarget { .. }
+            ) {
                 out.emit(Event::HintAmbiguousTargets);
             }
             code
