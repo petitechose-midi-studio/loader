@@ -21,6 +21,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          cargo_version=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          expected="v${cargo_version}"
+          if [ "$tag" != "$expected" ]; then
+            echo "tag=$tag does not match Cargo.toml version=$cargo_version (expected $expected)"
+            exit 1
+          fi
+
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |

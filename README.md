@@ -10,16 +10,41 @@ Early MVP. Scope is intentionally limited to Teensy 4.1.
 
 ## Usage
 
-Flash a firmware (Intel HEX) while the board is in HalfKay bootloader mode:
+List detected targets (HalfKay + PJRC USB serial):
 
 ```bash
-midi-studio-loader flash path/to/firmware.hex --wait
+midi-studio-loader list
 ```
 
-Try to enter HalfKay without the button (requires USB Serial in your firmware):
+Flash a firmware (Intel HEX):
 
 ```bash
-midi-studio-loader reboot --serial-port COM6
+midi-studio-loader flash path/to/firmware.hex
+```
+
+If multiple targets are connected, select one:
+
+```bash
+midi-studio-loader flash path/to/firmware.hex --device serial:COM6
+```
+
+Or flash all detected targets sequentially:
+
+```bash
+midi-studio-loader flash path/to/firmware.hex --all
+```
+
+Enter HalfKay without the button (requires USB Serial in your firmware):
+
+```bash
+midi-studio-loader reboot --device serial:COM6
+```
+
+Bridge control (optional):
+
+```bash
+midi-studio-loader flash path/to/firmware.hex --device serial:COM6 --bridge-control-port 7999
+midi-studio-loader flash path/to/firmware.hex --device serial:COM6 --no-bridge-control
 ```
 
 Machine-readable output:
@@ -41,6 +66,14 @@ midi-studio-loader flash path/to/firmware.hex --wait --no-reboot
 - Linux: you likely need udev rules for non-root access.
 - This tool only supports Teensy 4.1 and rejects HEX data outside the expected address range.
 
+### oc-bridge coordination
+
+When flashing a `serial:*` target, `midi-studio-loader` attempts to temporarily pause `oc-bridge`
+to release the serial port:
+
+1) Prefer localhost IPC (`oc-bridge ctl pause/resume`, default port `7999`)
+2) Fallback: stop/start the OS service (if installed)
+
 ## Library usage
 
 The crate can be used as a library (disable default features to avoid pulling the CLI deps):
@@ -53,17 +86,16 @@ midi-studio-loader = { git = "https://github.com/petitechose-midi-studio/loader"
 Example:
 
 ```rust
-use midi_studio_loader::api::{flash_teensy41, FlashOptions};
+use midi_studio_loader::api::{flash_teensy41_with_selection, FlashOptions, FlashSelection};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hex = std::path::Path::new("firmware.hex");
     let opts = FlashOptions {
         wait: true,
-        soft_reboot: true,
         serial_port: Some("COM6".to_string()),
         ..Default::default()
     };
-    flash_teensy41(hex, &opts, |_| {})?;
+    flash_teensy41_with_selection(hex, &opts, FlashSelection::Auto, |_| {})?;
     Ok(())
 }
 ```
@@ -83,6 +115,7 @@ cargo test --no-default-features
 - `10` no device (HalfKay not found)
 - `11` invalid hex
 - `12` write failed
+- `13` ambiguous target
 - `20` unexpected error
 
 ## Reference
