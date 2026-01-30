@@ -12,10 +12,32 @@ pub use ipc::{control_status, BridgeControlStatus};
 pub use process::{list_oc_bridge_processes, OcBridgeProcessInfo};
 pub use service::{default_service_id_for_platform, service_status, ServiceStatus};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeControlMethod {
+    Auto,
+    Control,
+    Service,
+    Process,
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct BridgeControlOptions {
     /// Enable automatic bridge pause/resume.
     pub enabled: bool,
+
+    /// Bridge control strategy.
+    ///
+    /// - `Auto`: prefer IPC, then service, then (optional) process fallback
+    /// - `Control`: IPC only
+    /// - `Service`: OS service stop/start only
+    /// - `Process`: process stop/relaunch only (requires `process-fallback`)
+    /// - `None`: never attempt to pause/resume
+    pub method: BridgeControlMethod,
+
+    /// Allow process fallback when `method=Auto`.
+    pub allow_process_fallback: bool,
 
     /// Override the OS service identifier.
     ///
@@ -40,6 +62,8 @@ impl Default for BridgeControlOptions {
     fn default() -> Self {
         Self {
             enabled: true,
+            method: BridgeControlMethod::Auto,
+            allow_process_fallback: true,
             service_id: None,
             timeout: Duration::from_secs(5),
             control_port: 7999,
@@ -152,7 +176,7 @@ pub struct BridgePause {
 }
 
 pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
-    if !opts.enabled {
+    if !opts.enabled || opts.method == BridgeControlMethod::None {
         return BridgePause {
             guard: None,
             outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::Disabled),
@@ -164,13 +188,140 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
         .clone()
         .unwrap_or_else(default_service_id_for_platform);
 
-    // 0) Prefer IPC pause/resume when available.
-    if let Ok(()) = ipc::control_pause(opts.control_port, opts.control_timeout) {
-        let info = BridgePauseInfo {
-            method: BridgePauseMethod::Control,
-            id: format!("127.0.0.1:{}", opts.control_port),
-            pids: Vec::new(),
+    match opts.method {
+        BridgeControlMethod::Auto => pause_auto(opts, &service_id),
+        BridgeControlMethod::Control => pause_control_only(opts),
+        BridgeControlMethod::Service => pause_service_only(opts, &service_id),
+        BridgeControlMethod::Process => pause_process_only(opts),
+        BridgeControlMethod::None => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::Disabled),
+        },
+    }
+}
+
+fn pause_control_only(opts: &BridgeControlOptions) -> BridgePause {
+    match ipc::control_pause(opts.control_port, opts.control_timeout) {
+        Ok(()) => BridgePause {
+            guard: Some(BridgeGuard {
+                resume: Some(ResumePlan::Control {
+                    port: opts.control_port,
+                    timeout: opts.control_timeout,
+                }),
+                timeout: opts.timeout,
+            }),
+            outcome: BridgePauseOutcome::Paused(BridgePauseInfo {
+                method: BridgePauseMethod::Control,
+                id: format!("127.0.0.1:{}", opts.control_port),
+                pids: Vec::new(),
+            }),
+        },
+        Err(e) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                message: format!("oc-bridge control pause failed: {e}"),
+                hint: Some(format!(
+                    "Try: oc-bridge ctl pause --control-port {}",
+                    opts.control_port
+                )),
+            }),
+        },
+    }
+}
+
+fn pause_service_only(opts: &BridgeControlOptions, service_id: &str) -> BridgePause {
+    match service::service_status(service_id) {
+        Ok(ServiceStatus::Running) => match service::stop_service(service_id, opts.timeout) {
+            Ok(()) => BridgePause {
+                guard: Some(BridgeGuard {
+                    resume: Some(ResumePlan::Service {
+                        id: service_id.to_string(),
+                    }),
+                    timeout: opts.timeout,
+                }),
+                outcome: BridgePauseOutcome::Paused(BridgePauseInfo {
+                    method: BridgePauseMethod::Service,
+                    id: service_id.to_string(),
+                    pids: Vec::new(),
+                }),
+            },
+            Err(e) => BridgePause {
+                guard: None,
+                outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                    message: format!("unable to stop bridge service '{service_id}': {e}"),
+                    hint: Some(service::hint_stop_service(service_id)),
+                }),
+            },
+        },
+        Ok(ServiceStatus::Stopped) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotRunning),
+        },
+        Ok(ServiceStatus::NotInstalled) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                message: format!("bridge service '{service_id}' is not installed"),
+                hint: Some(service::hint_query_service(service_id)),
+            }),
+        },
+        Err(e) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                message: format!("unable to query bridge service '{service_id}': {e}"),
+                hint: Some(service::hint_query_service(service_id)),
+            }),
+        },
+    }
+}
+
+fn pause_process_only(opts: &BridgeControlOptions) -> BridgePause {
+    if !opts.allow_process_fallback {
+        return BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                message: "process fallback disabled".to_string(),
+                hint: Some("Remove --no-process-fallback".to_string()),
+            }),
         };
+    }
+
+    match process::pause_process_fallback(opts.timeout) {
+        process::ProcessPauseOutcome::Paused {
+            info,
+            relaunch_cmds,
+        } => BridgePause {
+            guard: Some(BridgeGuard {
+                resume: Some(ResumePlan::Processes {
+                    cmds: relaunch_cmds,
+                }),
+                timeout: opts.timeout,
+            }),
+            outcome: BridgePauseOutcome::Paused(info),
+        },
+        process::ProcessPauseOutcome::Skipped(BridgePauseSkipReason::NotRunning) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotRunning),
+        },
+        process::ProcessPauseOutcome::Skipped(other) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
+                message: format!("process fallback unavailable: {other:?}"),
+                hint: Some(
+                    "Ensure process-fallback feature is enabled and the process is restartable"
+                        .to_string(),
+                ),
+            }),
+        },
+        process::ProcessPauseOutcome::Failed(error) => BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Failed(error),
+        },
+    }
+}
+
+fn pause_auto(opts: &BridgeControlOptions, service_id: &str) -> BridgePause {
+    // Prefer IPC pause/resume.
+    if let Ok(()) = ipc::control_pause(opts.control_port, opts.control_timeout) {
         return BridgePause {
             guard: Some(BridgeGuard {
                 resume: Some(ResumePlan::Control {
@@ -179,25 +330,30 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
                 }),
                 timeout: opts.timeout,
             }),
-            outcome: BridgePauseOutcome::Paused(info),
+            outcome: BridgePauseOutcome::Paused(BridgePauseInfo {
+                method: BridgePauseMethod::Control,
+                id: format!("127.0.0.1:{}", opts.control_port),
+                pids: Vec::new(),
+            }),
         };
     }
 
-    // 1) service-first
-    match service::service_status(&service_id) {
-        Ok(ServiceStatus::Running) => match service::stop_service(&service_id, opts.timeout) {
+    // Service-first.
+    match service::service_status(service_id) {
+        Ok(ServiceStatus::Running) => match service::stop_service(service_id, opts.timeout) {
             Ok(()) => {
-                let info = BridgePauseInfo {
-                    method: BridgePauseMethod::Service,
-                    id: service_id.clone(),
-                    pids: Vec::new(),
-                };
                 return BridgePause {
                     guard: Some(BridgeGuard {
-                        resume: Some(ResumePlan::Service { id: service_id }),
+                        resume: Some(ResumePlan::Service {
+                            id: service_id.to_string(),
+                        }),
                         timeout: opts.timeout,
                     }),
-                    outcome: BridgePauseOutcome::Paused(info),
+                    outcome: BridgePauseOutcome::Paused(BridgePauseInfo {
+                        method: BridgePauseMethod::Service,
+                        id: service_id.to_string(),
+                        pids: Vec::new(),
+                    }),
                 };
             }
             Err(e) => {
@@ -205,7 +361,7 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
                     guard: None,
                     outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
                         message: format!("unable to stop bridge service '{service_id}': {e}"),
-                        hint: Some(service::hint_stop_service(&service_id)),
+                        hint: Some(service::hint_stop_service(service_id)),
                     }),
                 };
             }
@@ -223,13 +379,20 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
                 guard: None,
                 outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
                     message: format!("unable to query bridge service '{service_id}': {e}"),
-                    hint: Some(service::hint_query_service(&service_id)),
+                    hint: Some(service::hint_query_service(service_id)),
                 }),
             };
         }
     }
 
-    // 2) process fallback (only if restartable)
+    if !opts.allow_process_fallback {
+        return BridgePause {
+            guard: None,
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotInstalled),
+        };
+    }
+
+    // Process fallback (only if restartable).
     match process::pause_process_fallback(opts.timeout) {
         process::ProcessPauseOutcome::Paused {
             info,

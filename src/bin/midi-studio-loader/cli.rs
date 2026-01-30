@@ -1,6 +1,15 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum BridgeMethodArg {
+    Auto,
+    Control,
+    Service,
+    Process,
+    None,
+}
 
 #[derive(Parser)]
 #[command(name = "midi-studio-loader")]
@@ -31,6 +40,14 @@ pub struct BridgeControlArgs {
     /// Disable automatic oc-bridge pause/resume.
     #[arg(long)]
     pub no_bridge_control: bool,
+
+    /// Bridge pause/resume strategy.
+    #[arg(long, value_enum, default_value_t = BridgeMethodArg::Auto)]
+    pub bridge_method: BridgeMethodArg,
+
+    /// Disable process fallback when `--bridge-method auto` is used.
+    #[arg(long)]
+    pub no_process_fallback: bool,
 
     /// Max time to wait when stopping/starting the bridge.
     #[arg(long, default_value_t = 5000)]
