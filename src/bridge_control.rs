@@ -426,7 +426,15 @@ fn service_status(service_id: &str) -> Result<ServiceStatus, BridgeControlError>
         if out.status_code == 0 {
             return Ok(ServiceStatus::Running);
         }
-        Ok(ServiceStatus::NotInstalled)
+
+        // launchctl doesn't provide a stable exit code distinction between
+        // "not installed" and "installed but stopped". We treat the common
+        // "could not find" case as NotInstalled, otherwise Stopped.
+        let lower = out.text.to_ascii_lowercase();
+        if lower.contains("could not find") || lower.contains("no such process") {
+            return Ok(ServiceStatus::NotInstalled);
+        }
+        Ok(ServiceStatus::Stopped)
     }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -445,6 +453,7 @@ fn stop_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControl
 
     #[cfg(target_os = "linux")]
     {
+        let _timeout = timeout;
         let _ = run_capture(
             "systemctl",
             &["--user", "stop", service_id],
@@ -455,6 +464,7 @@ fn stop_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControl
 
     #[cfg(target_os = "macos")]
     {
+        let _timeout = timeout;
         let _ = run_capture("launchctl", &["stop", service_id], None)?;
         Ok(())
     }
@@ -475,6 +485,7 @@ fn start_service(service_id: &str, timeout: Duration) -> Result<(), BridgeContro
 
     #[cfg(target_os = "linux")]
     {
+        let _timeout = timeout;
         let _ = run_capture(
             "systemctl",
             &["--user", "start", service_id],
@@ -485,6 +496,7 @@ fn start_service(service_id: &str, timeout: Duration) -> Result<(), BridgeContro
 
     #[cfg(target_os = "macos")]
     {
+        let _timeout = timeout;
         let _ = run_capture("launchctl", &["start", service_id], None)?;
         Ok(())
     }
