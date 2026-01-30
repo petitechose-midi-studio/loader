@@ -4,6 +4,7 @@ pub mod bridge_control;
 pub mod halfkay;
 pub mod hex;
 pub mod operation;
+mod operation_runner;
 pub mod reboot_api;
 pub mod selector;
 pub mod serial_reboot;

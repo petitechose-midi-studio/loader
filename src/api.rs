@@ -202,89 +202,16 @@ where
     let plan = plan_teensy41_with_selection(hex_path, opts, selection, &mut on_event)?;
     let fw = plan.firmware;
     let selected = plan.selected_targets;
-    let needs_serial = plan.needs_serial;
-    let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
-    if needs_serial {
-        on_event(OperationEvent::BridgePauseStart);
-        let paused = bridge_control::pause_oc_bridge(&opts.bridge);
-        match &paused.outcome {
-            bridge_control::BridgePauseOutcome::Paused(info) => {
-                on_event(OperationEvent::BridgePaused { info: info.clone() });
-            }
-            bridge_control::BridgePauseOutcome::Skipped(reason) => {
-                on_event(OperationEvent::BridgePauseSkipped {
-                    reason: reason.clone(),
-                });
-            }
-            bridge_control::BridgePauseOutcome::Failed(error) => {
-                on_event(OperationEvent::BridgePauseFailed {
-                    error: error.clone(),
-                });
-            }
-        }
-        bridge_guard = paused.guard;
-    }
 
-    let total = selected.len();
-    let multi = total > 1;
-    let mut failed = 0usize;
-    let mut fatal_err: Option<FlashError> = None;
-
-    for target in selected {
-        let target_id = target.id();
-        on_event(OperationEvent::TargetStart {
-            target_id: target_id.clone(),
-            kind: target.kind(),
-        });
-
-        let r = flash_one_target(&target, &target_id, &fw, opts, &mut on_event);
-        match r {
-            Ok(()) => {
-                on_event(OperationEvent::TargetDone {
-                    target_id,
-                    ok: true,
-                    message: None,
-                });
-            }
-            Err(e) => {
-                failed += 1;
-                on_event(OperationEvent::TargetDone {
-                    target_id: target_id.clone(),
-                    ok: false,
-                    message: Some(e.to_string()),
-                });
-
-                if !multi {
-                    fatal_err = Some(e);
-                    break;
-                }
-            }
-        }
-    }
-
-    let result = if let Some(e) = fatal_err {
-        Err(e)
-    } else if failed > 0 {
-        Err(FlashError::MultiTargetFailed { failed, total })
-    } else {
-        Ok(())
-    };
-
-    if let Some(mut g) = bridge_guard {
-        on_event(OperationEvent::BridgeResumeStart);
-        let hint = g.resume_hint();
-        match g.resume() {
-            Ok(()) => on_event(OperationEvent::BridgeResumed),
-            Err(e) => on_event(OperationEvent::BridgeResumeFailed {
-                error: bridge_control::BridgeControlErrorInfo {
-                    message: format!("bridge resume failed: {e}"),
-                    hint,
-                },
-            }),
-        }
-    }
-
-    result
+    crate::operation_runner::run_targets_with_bridge(
+        selected,
+        &opts.bridge,
+        |target, target_id, on_event| flash_one_target(target, target_id, &fw, opts, on_event),
+        |e| matches!(e.kind(), FlashErrorKind::AmbiguousTarget),
+        |message| FlashError::AmbiguousTarget { message },
+        |failed, total| FlashError::MultiTargetFailed { failed, total },
+        &mut on_event,
+    )
 }
 
 fn discover_targets_for_flash<F>(

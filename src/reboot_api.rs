@@ -5,10 +5,7 @@ use thiserror::Error;
 
 use crate::api::FlashSelection;
 use crate::operation::OperationEvent;
-use crate::{
-    bootloader, bridge_control, halfkay, serial_reboot, targets,
-    targets::{Target, TargetKind},
-};
+use crate::{bootloader, bridge_control, halfkay, serial_reboot, targets, targets::Target};
 
 #[derive(Debug, Clone)]
 pub struct RebootOptions {
@@ -136,97 +133,15 @@ where
         },
     })?;
 
-    let needs_serial = selected.iter().any(|t| t.kind() == TargetKind::Serial);
-    let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
-    if needs_serial {
-        on_event(OperationEvent::BridgePauseStart);
-        let paused = bridge_control::pause_oc_bridge(&opts.bridge);
-        match &paused.outcome {
-            bridge_control::BridgePauseOutcome::Paused(info) => {
-                on_event(OperationEvent::BridgePaused { info: info.clone() });
-            }
-            bridge_control::BridgePauseOutcome::Skipped(reason) => {
-                on_event(OperationEvent::BridgePauseSkipped {
-                    reason: reason.clone(),
-                });
-            }
-            bridge_control::BridgePauseOutcome::Failed(error) => {
-                on_event(OperationEvent::BridgePauseFailed {
-                    error: error.clone(),
-                });
-            }
-        }
-        bridge_guard = paused.guard;
-    }
-
-    let total = selected.len();
-    let multi = total > 1;
-    let mut failed = 0usize;
-    let mut fatal_err: Option<RebootError> = None;
-    let mut ambiguous_message: Option<String> = None;
-
-    for target in selected {
-        let target_id = target.id();
-        on_event(OperationEvent::TargetStart {
-            target_id: target_id.clone(),
-            kind: target.kind(),
-        });
-
-        let r = reboot_one_target(&target, &target_id, opts, &mut on_event);
-        match r {
-            Ok(()) => {
-                on_event(OperationEvent::TargetDone {
-                    target_id,
-                    ok: true,
-                    message: None,
-                });
-            }
-            Err(e) => {
-                failed += 1;
-                if let RebootError::AmbiguousTarget { message } = &e {
-                    if ambiguous_message.is_none() {
-                        ambiguous_message = Some(message.clone());
-                    }
-                }
-                on_event(OperationEvent::TargetDone {
-                    target_id: target_id.clone(),
-                    ok: false,
-                    message: Some(e.to_string()),
-                });
-
-                if !multi {
-                    fatal_err = Some(e);
-                    break;
-                }
-            }
-        }
-    }
-
-    let result = if let Some(e) = fatal_err {
-        Err(e)
-    } else if let Some(message) = ambiguous_message {
-        Err(RebootError::AmbiguousTarget { message })
-    } else if failed > 0 {
-        Err(RebootError::MultiTargetFailed { failed, total })
-    } else {
-        Ok(())
-    };
-
-    if let Some(mut g) = bridge_guard {
-        on_event(OperationEvent::BridgeResumeStart);
-        let hint = g.resume_hint();
-        match g.resume() {
-            Ok(()) => on_event(OperationEvent::BridgeResumed),
-            Err(e) => on_event(OperationEvent::BridgeResumeFailed {
-                error: bridge_control::BridgeControlErrorInfo {
-                    message: format!("bridge resume failed: {e}"),
-                    hint,
-                },
-            }),
-        }
-    }
-
-    result
+    crate::operation_runner::run_targets_with_bridge(
+        selected,
+        &opts.bridge,
+        |target, target_id, on_event| reboot_one_target(target, target_id, opts, on_event),
+        |e| matches!(e.kind(), RebootErrorKind::AmbiguousTarget),
+        |message| RebootError::AmbiguousTarget { message },
+        |failed, total| RebootError::MultiTargetFailed { failed, total },
+        &mut on_event,
+    )
 }
 
 fn reboot_one_target<F>(
