@@ -4,16 +4,13 @@ use std::time::Duration;
 use midi_studio_loader::{bootloader, halfkay, selector, serial_reboot, targets};
 
 use crate::cli;
+use crate::context;
 use crate::exit_codes;
 use crate::output::json::JsonEvent;
 use crate::output::Output;
 
 pub fn run(args: cli::RebootArgs, out: &mut dyn Output) -> i32 {
-    let wait_timeout = if args.wait_timeout_ms == 0 {
-        None
-    } else {
-        Some(Duration::from_millis(args.wait_timeout_ms))
-    };
+    let wait_timeout = context::wait_timeout(args.wait_timeout_ms);
 
     if args.json {
         out.json_event(JsonEvent::status("reboot_start"));
@@ -108,13 +105,7 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Output) -> i32 {
 
     let mut bridge_guard: Option<midi_studio_loader::bridge_control::BridgeGuard> = None;
     if needs_serial {
-        let bridge = midi_studio_loader::bridge_control::BridgeControlOptions {
-            enabled: !args.bridge.no_bridge_control,
-            service_id: args.bridge.bridge_service_id.clone(),
-            timeout: Duration::from_millis(args.bridge.bridge_timeout_ms),
-            control_port: args.bridge.bridge_control_port,
-            control_timeout: Duration::from_millis(args.bridge.bridge_control_timeout_ms),
-        };
+        let bridge = context::bridge_opts(&args.bridge);
 
         if args.json {
             out.json_event(JsonEvent::status("bridge_pause_start"));

@@ -4,6 +4,7 @@ use clap::Parser;
 
 mod cli;
 mod commands;
+mod context;
 mod exit_codes;
 mod output;
 
