@@ -1,6 +1,6 @@
 use crate::cli;
 
-use midi_studio_loader::{api, targets};
+use midi_studio_loader::{api, bridge_control, targets};
 
 pub mod human;
 pub mod json;
@@ -10,27 +10,55 @@ mod tests;
 
 #[derive(Debug, Clone, Copy)]
 pub struct OutputOptions {
-    pub json: bool,
     pub verbose: bool,
     pub quiet: bool,
 }
 
-pub trait Output {
-    fn options(&self) -> OutputOptions;
+#[derive(Debug, Clone)]
+pub struct DryRunSummary {
+    pub bytes: usize,
+    pub blocks: usize,
+    pub blocks_to_write: usize,
+    pub target_ids: Vec<String>,
+    pub needs_serial: bool,
+    pub bridge_enabled: bool,
+    pub bridge_control_port: u16,
+}
 
-    fn json_line(&mut self, value: serde_json::Value);
-    fn json_event(&mut self, ev: json::JsonEvent);
-    fn human_line(&mut self, msg: &str);
-    fn error(&mut self, code: i32, msg: &str);
+#[derive(Debug, Clone)]
+pub struct DoctorReport {
+    pub service_id: String,
+    pub targets: Vec<targets::Target>,
 
-    fn flash_event(&mut self, ev: api::FlashEvent);
-    fn ambiguous_help(&mut self);
+    pub control_port: u16,
+    pub control_timeout_ms: u64,
+    pub control_checked: bool,
+    pub control: Option<bridge_control::BridgeControlStatus>,
+    pub control_error: Option<String>,
+
+    pub service_status: Option<bridge_control::ServiceStatus>,
+    pub service_error: Option<String>,
+
+    pub processes: Vec<bridge_control::OcBridgeProcessInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Flash(api::FlashEvent),
+    DryRun(DryRunSummary),
+    ListTargets(Vec<targets::Target>),
+    Doctor(DoctorReport),
+    Error { code: i32, message: String },
+    HintAmbiguousTargets,
+}
+
+pub trait Reporter {
+    fn emit(&mut self, event: Event);
     fn finish(&mut self);
 }
 
-pub fn make_for_flash(args: &cli::FlashArgs) -> Box<dyn Output> {
+pub fn make_for_flash(args: &cli::FlashArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
-        json: args.json,
         verbose: args.verbose,
         quiet: args.quiet,
     };
@@ -41,9 +69,8 @@ pub fn make_for_flash(args: &cli::FlashArgs) -> Box<dyn Output> {
     }
 }
 
-pub fn make_for_reboot(args: &cli::RebootArgs) -> Box<dyn Output> {
+pub fn make_for_reboot(args: &cli::RebootArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
-        json: args.json,
         verbose: args.verbose,
         quiet: false,
     };
@@ -54,9 +81,8 @@ pub fn make_for_reboot(args: &cli::RebootArgs) -> Box<dyn Output> {
     }
 }
 
-pub fn make_for_list(args: &cli::ListArgs) -> Box<dyn Output> {
+pub fn make_for_list(args: &cli::ListArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
-        json: args.json,
         verbose: false,
         quiet: false,
     };
@@ -67,9 +93,8 @@ pub fn make_for_list(args: &cli::ListArgs) -> Box<dyn Output> {
     }
 }
 
-pub fn make_for_doctor(args: &cli::DoctorArgs) -> Box<dyn Output> {
+pub fn make_for_doctor(args: &cli::DoctorArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
-        json: args.json,
         verbose: false,
         quiet: false,
     };
@@ -88,4 +113,19 @@ pub fn target_to_value(index: usize, t: &targets::Target) -> serde_json::Value {
         obj.insert("id".to_string(), serde_json::Value::from(t.id()));
     }
     v
+}
+
+pub fn format_target_line(index: usize, t: &targets::Target) -> String {
+    match t {
+        targets::Target::HalfKay(hk) => {
+            format!("[{index}] halfkay {} {:04X}:{:04X}", t.id(), hk.vid, hk.pid)
+        }
+        targets::Target::Serial(s) => format!(
+            "[{index}] serial  {} {:04X}:{:04X} {}",
+            t.id(),
+            s.vid,
+            s.pid,
+            s.product.as_deref().unwrap_or("")
+        ),
+    }
 }

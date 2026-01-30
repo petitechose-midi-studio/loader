@@ -2,7 +2,11 @@ use std::io::{IsTerminal, Write};
 
 use midi_studio_loader::{api, targets};
 
-use crate::output::{Output, OutputOptions};
+use midi_studio_loader::teensy41;
+
+use crate::output::{
+    format_target_line, DoctorReport, DryRunSummary, Event, OutputOptions, Reporter,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -92,32 +96,11 @@ impl HumanOutput {
     }
 
     pub(crate) fn ambiguous_help_lines(detected: &[Option<targets::Target>]) -> Vec<String> {
-        let mut lines: Vec<String> = Vec::new();
-        for (i, t) in detected.iter().enumerate() {
-            let Some(t) = t else {
-                continue;
-            };
-            match t {
-                targets::Target::HalfKay(hk) => {
-                    lines.push(format!(
-                        "[{i}] halfkay {} {:04X}:{:04X}",
-                        t.id(),
-                        hk.vid,
-                        hk.pid
-                    ));
-                }
-                targets::Target::Serial(s) => {
-                    lines.push(format!(
-                        "[{i}] serial  {} {:04X}:{:04X} {}",
-                        t.id(),
-                        s.vid,
-                        s.pid,
-                        s.product.as_deref().unwrap_or("")
-                    ));
-                }
-            }
-        }
-        lines
+        detected
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.as_ref().map(|t| format_target_line(i, t)))
+            .collect()
     }
 
     fn print_ambiguous_help(&mut self) {
@@ -139,25 +122,8 @@ impl HumanOutput {
     }
 }
 
-impl Output for HumanOutput {
-    fn options(&self) -> OutputOptions {
-        self.opts
-    }
-
-    fn json_line(&mut self, _value: serde_json::Value) {}
-
-    fn json_event(&mut self, _ev: super::json::JsonEvent) {}
-
-    fn human_line(&mut self, msg: &str) {
-        self.println(msg);
-    }
-
-    fn error(&mut self, _code: i32, msg: &str) {
-        self.finish_line();
-        eprintln!("error: {msg}");
-    }
-
-    fn flash_event(&mut self, ev: api::FlashEvent) {
+impl HumanOutput {
+    fn on_flash_event(&mut self, ev: api::FlashEvent) {
         match ev {
             api::FlashEvent::DiscoverStart => {
                 if self.mode() != Mode::Quiet {
@@ -330,12 +296,111 @@ impl Output for HumanOutput {
             }
         }
     }
+}
 
-    fn ambiguous_help(&mut self) {
-        self.print_ambiguous_help();
+impl Reporter for HumanOutput {
+    fn emit(&mut self, event: Event) {
+        match event {
+            Event::Flash(ev) => self.on_flash_event(ev),
+            Event::DryRun(summary) => emit_dry_run(summary, self),
+            Event::ListTargets(targets) => emit_list_targets(&targets, self),
+            Event::Doctor(report) => emit_doctor(report, self),
+            Event::Error { code: _, message } => {
+                self.finish_line();
+                eprintln!("error: {message}");
+            }
+            Event::HintAmbiguousTargets => self.print_ambiguous_help(),
+        }
     }
 
     fn finish(&mut self) {
         self.finish_line();
+    }
+}
+
+fn emit_list_targets(targets: &[targets::Target], out: &mut HumanOutput) {
+    if targets.is_empty() {
+        out.println(&format!(
+            "No targets found (HalfKay {:04X}:{:04X} or PJRC USB serial)",
+            teensy41::VID,
+            teensy41::PID_HALFKAY
+        ));
+        return;
+    }
+
+    for (i, t) in targets.iter().enumerate() {
+        out.println(&format_target_line(i, t));
+    }
+}
+
+fn emit_doctor(report: DoctorReport, out: &mut HumanOutput) {
+    out.println("midi-studio-loader doctor");
+    out.println(&format!("targets: {}", report.targets.len()));
+    for (i, t) in report.targets.iter().enumerate() {
+        out.println(&format_target_line(i, t));
+    }
+
+    out.println(&format!(
+        "oc-bridge control: 127.0.0.1:{} (timeout {}ms){}",
+        report.control_port,
+        report.control_timeout_ms,
+        if report.control_checked {
+            ""
+        } else {
+            " (skipped)"
+        }
+    ));
+
+    if report.control_checked {
+        if let Some(st) = report.control {
+            out.println(&format!(
+                "  ok={} paused={} serial_open={:?}",
+                st.ok, st.paused, st.serial_open
+            ));
+            if let Some(m) = st.message {
+                out.println(&format!("  message: {m}"));
+            }
+        } else if let Some(e) = report.control_error {
+            out.println(&format!("  error: {e}"));
+        }
+    }
+
+    out.println(&format!("oc-bridge service: {}", report.service_id));
+    match (report.service_status, report.service_error) {
+        (Some(s), _) => out.println(&format!("  status: {s:?}")),
+        (None, Some(e)) => out.println(&format!("  error: {e}")),
+        _ => {}
+    }
+
+    out.println(&format!("oc-bridge processes: {}", report.processes.len()));
+    for p in report.processes {
+        out.println(&format!(
+            "  pid={} restartable={} exe={}",
+            p.pid,
+            if p.restartable { "yes" } else { "no" },
+            p.exe.as_deref().unwrap_or("")
+        ));
+    }
+}
+
+fn emit_dry_run(summary: DryRunSummary, out: &mut HumanOutput) {
+    if out.mode() == Mode::Quiet {
+        return;
+    }
+
+    out.println("Dry run OK");
+    out.println(&format!(
+        "Firmware: {} bytes, blocks_to_write={}/{},",
+        summary.bytes, summary.blocks_to_write, summary.blocks
+    ));
+    out.println(&format!("Targets: {}", summary.target_ids.len()));
+    for id in &summary.target_ids {
+        out.println(&format!("- {id}"));
+    }
+    if summary.needs_serial && summary.bridge_enabled {
+        out.println(&format!(
+            "Bridge: would pause/resume oc-bridge (control port {})",
+            summary.bridge_control_port
+        ));
     }
 }

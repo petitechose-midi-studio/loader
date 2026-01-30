@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use midi_studio_loader::{api, targets};
 
-use crate::output::{Output, OutputOptions};
+use crate::output::{target_to_value, DoctorReport, DryRunSummary, Event, OutputOptions, Reporter};
 
 #[derive(serde::Serialize)]
 pub struct JsonEvent {
@@ -47,12 +47,8 @@ impl JsonOutput {
     }
 }
 
-impl Output for JsonOutput {
-    fn options(&self) -> OutputOptions {
-        self.opts
-    }
-
-    fn json_line(&mut self, value: serde_json::Value) {
+impl JsonOutput {
+    fn json_value(&mut self, value: serde_json::Value) {
         println!(
             "{}",
             serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
@@ -66,13 +62,7 @@ impl Output for JsonOutput {
         );
     }
 
-    fn human_line(&mut self, msg: &str) {
-        if self.opts.verbose {
-            eprintln!("{msg}");
-        }
-    }
-
-    fn error(&mut self, code: i32, msg: &str) {
+    fn error_event(&mut self, code: i32, msg: &str) {
         self.json_event(
             JsonEvent::status("error")
                 .with_u64("code", code as u64)
@@ -83,14 +73,96 @@ impl Output for JsonOutput {
             eprintln!("error: {msg}");
         }
     }
+}
 
-    fn flash_event(&mut self, ev: api::FlashEvent) {
-        self.json_event(flash_event_to_json(ev));
+impl Reporter for JsonOutput {
+    fn emit(&mut self, event: Event) {
+        match event {
+            Event::Flash(ev) => self.json_event(flash_event_to_json(ev)),
+            Event::DryRun(summary) => emit_dry_run(summary, self),
+            Event::ListTargets(targets) => {
+                for (i, t) in targets.iter().enumerate() {
+                    self.json_value(target_to_value(i, t));
+                }
+            }
+            Event::Doctor(report) => emit_doctor(report, self),
+            Event::Error { code, message } => self.error_event(code, &message),
+            Event::HintAmbiguousTargets => {}
+        }
     }
 
-    fn ambiguous_help(&mut self) {}
-
     fn finish(&mut self) {}
+}
+
+fn emit_dry_run(summary: DryRunSummary, out: &mut JsonOutput) {
+    out.json_event(
+        JsonEvent::status("dry_run")
+            .with_u64("bytes", summary.bytes as u64)
+            .with_u64("blocks", summary.blocks as u64)
+            .with_u64("blocks_to_write", summary.blocks_to_write as u64)
+            .with_u64("targets", summary.target_ids.len() as u64)
+            .with_u64("needs_serial", if summary.needs_serial { 1 } else { 0 })
+            .with_u64("bridge_enabled", if summary.bridge_enabled { 1 } else { 0 })
+            .with_u64("bridge_control_port", summary.bridge_control_port as u64)
+            .with_value(
+                "target_ids",
+                serde_json::Value::Array(
+                    summary
+                        .target_ids
+                        .iter()
+                        .map(|t| serde_json::Value::from(t.clone()))
+                        .collect(),
+                ),
+            ),
+    );
+}
+
+fn emit_doctor(report: DoctorReport, out: &mut JsonOutput) {
+    let targets_val = serde_json::Value::Array(
+        report
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| target_to_value(i, t))
+            .collect(),
+    );
+
+    let mut ev = JsonEvent::status("doctor")
+        .with_str("service_id", &report.service_id)
+        .with_value("targets", targets_val)
+        .with_value(
+            "processes",
+            serde_json::to_value(&report.processes)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        )
+        .with_u64("control_port", report.control_port as u64)
+        .with_u64("control_timeout_ms", report.control_timeout_ms)
+        .with_u64(
+            "control_checked",
+            if report.control_checked { 1 } else { 0 },
+        );
+
+    if let Some(st) = &report.control {
+        ev = ev.with_value(
+            "control",
+            serde_json::to_value(st)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+        );
+    }
+    if let Some(e) = &report.control_error {
+        ev = ev.with_str("control_error", e);
+    }
+    if let Some(s) = report.service_status {
+        ev = ev.with_value(
+            "service_status",
+            serde_json::to_value(s).unwrap_or_else(|_| serde_json::Value::from("unknown")),
+        );
+    }
+    if let Some(e) = &report.service_error {
+        ev = ev.with_str("service_error", e);
+    }
+
+    out.json_event(ev);
 }
 
 pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {

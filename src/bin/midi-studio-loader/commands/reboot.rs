@@ -3,9 +3,9 @@ use midi_studio_loader::{api, reboot_api};
 use crate::cli;
 use crate::context;
 use crate::exit_codes;
-use crate::output::Output;
+use crate::output::{Event, Reporter};
 
-pub fn run(args: cli::RebootArgs, out: &mut dyn Output) -> i32 {
+pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
     let selection = if args.all {
         api::FlashSelection::All
     } else if let Some(sel) = args.device.clone() {
@@ -21,7 +21,9 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Output) -> i32 {
         ..Default::default()
     };
 
-    let r = reboot_api::reboot_teensy41_with_selection(&opts, selection, |ev| out.flash_event(ev));
+    let r = reboot_api::reboot_teensy41_with_selection(&opts, selection, |ev| {
+        out.emit(Event::Flash(ev))
+    });
     match r {
         Ok(()) => exit_codes::EXIT_OK,
         Err(e) => {
@@ -30,9 +32,12 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Output) -> i32 {
                 reboot_api::RebootErrorKind::AmbiguousTarget => exit_codes::EXIT_AMBIGUOUS,
                 reboot_api::RebootErrorKind::Unexpected => exit_codes::EXIT_UNEXPECTED,
             };
-            out.error(code, &e.to_string());
+            out.emit(Event::Error {
+                code,
+                message: e.to_string(),
+            });
             if code == exit_codes::EXIT_AMBIGUOUS {
-                out.ambiguous_help();
+                out.emit(Event::HintAmbiguousTargets);
             }
             code
         }

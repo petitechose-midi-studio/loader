@@ -5,10 +5,9 @@ use midi_studio_loader::api;
 use crate::cli;
 use crate::context;
 use crate::exit_codes;
-use crate::output::json::JsonEvent;
-use crate::output::Output;
+use crate::output::{DryRunSummary, Event, Reporter};
 
-pub fn run(args: cli::FlashArgs, out: &mut dyn Output) -> i32 {
+pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
     let wait_timeout = context::wait_timeout(args.wait_timeout_ms);
 
     let bridge = context::bridge_opts(&args.bridge);
@@ -35,16 +34,20 @@ pub fn run(args: cli::FlashArgs, out: &mut dyn Output) -> i32 {
         return dry_run(&args.hex, &opts, selection, out);
     }
 
-    let r =
-        api::flash_teensy41_with_selection(&args.hex, &opts, selection, |ev| out.flash_event(ev));
+    let r = api::flash_teensy41_with_selection(&args.hex, &opts, selection, |ev| {
+        out.emit(Event::Flash(ev))
+    });
 
     match r {
         Ok(()) => exit_codes::EXIT_OK,
         Err(e) => {
             let code = map_flash_error(&e);
-            out.error(code, &e.to_string());
+            out.emit(Event::Error {
+                code,
+                message: e.to_string(),
+            });
             if code == exit_codes::EXIT_AMBIGUOUS {
-                out.ambiguous_help();
+                out.emit(Event::HintAmbiguousTargets);
             }
             code
         }
@@ -55,58 +58,32 @@ fn dry_run(
     hex: &Path,
     opts: &api::FlashOptions,
     selection: api::FlashSelection,
-    out: &mut dyn Output,
+    out: &mut dyn Reporter,
 ) -> i32 {
-    let r = api::plan_teensy41_with_selection(hex, opts, selection, |ev| out.flash_event(ev));
+    let r =
+        api::plan_teensy41_with_selection(hex, opts, selection, |ev| out.emit(Event::Flash(ev)));
     match r {
         Ok(plan) => {
-            if out.options().json {
-                out.json_event(
-                    JsonEvent::status("dry_run")
-                        .with_u64("bytes", plan.firmware.byte_count as u64)
-                        .with_u64("blocks", plan.firmware.num_blocks as u64)
-                        .with_u64(
-                            "blocks_to_write",
-                            plan.firmware.blocks_to_write.len() as u64,
-                        )
-                        .with_u64("targets", plan.selected_targets.len() as u64)
-                        .with_u64("needs_serial", if plan.needs_serial { 1 } else { 0 })
-                        .with_value(
-                            "target_ids",
-                            serde_json::Value::Array(
-                                plan.selected_targets
-                                    .iter()
-                                    .map(|t| serde_json::Value::from(t.id()))
-                                    .collect(),
-                            ),
-                        ),
-                );
-            } else if !out.options().quiet {
-                out.human_line("Dry run OK");
-                out.human_line(&format!(
-                    "Firmware: {} bytes, blocks_to_write={}/{},",
-                    plan.firmware.byte_count,
-                    plan.firmware.blocks_to_write.len(),
-                    plan.firmware.num_blocks
-                ));
-                out.human_line(&format!("Targets: {}", plan.selected_targets.len()));
-                for t in &plan.selected_targets {
-                    out.human_line(&format!("- {}", t.id()));
-                }
-                if plan.needs_serial && opts.bridge.enabled {
-                    out.human_line(&format!(
-                        "Bridge: would pause/resume oc-bridge (control port {})",
-                        opts.bridge.control_port
-                    ));
-                }
-            }
+            let summary = DryRunSummary {
+                bytes: plan.firmware.byte_count,
+                blocks: plan.firmware.num_blocks,
+                blocks_to_write: plan.firmware.blocks_to_write.len(),
+                target_ids: plan.selected_targets.iter().map(|t| t.id()).collect(),
+                needs_serial: plan.needs_serial,
+                bridge_enabled: opts.bridge.enabled,
+                bridge_control_port: opts.bridge.control_port,
+            };
+            out.emit(Event::DryRun(summary));
             exit_codes::EXIT_OK
         }
         Err(e) => {
             let code = map_flash_error(&e);
-            out.error(code, &e.to_string());
+            out.emit(Event::Error {
+                code,
+                message: e.to_string(),
+            });
             if code == exit_codes::EXIT_AMBIGUOUS {
-                out.ambiguous_help();
+                out.emit(Event::HintAmbiguousTargets);
             }
             code
         }
