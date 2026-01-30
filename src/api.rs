@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::{
-    bootloader, bridge_control, halfkay, hex, selector, serial_reboot, targets,
+    bootloader, bridge_control, halfkay, hex,
+    operation::OperationEvent,
+    selector, serial_reboot, targets,
     targets::{Target, TargetKind},
 };
 
@@ -55,89 +57,6 @@ impl Default for FlashOptions {
             soft_reboot_delay: Duration::from_millis(250),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum FlashEvent {
-    DiscoverStart,
-    TargetDetected {
-        index: usize,
-        target: Target,
-    },
-    DiscoverDone {
-        count: usize,
-    },
-    TargetSelected {
-        target_id: String,
-    },
-
-    BridgePauseStart,
-    BridgePaused {
-        info: bridge_control::BridgePauseInfo,
-    },
-    BridgePauseSkipped {
-        reason: bridge_control::BridgePauseSkipReason,
-    },
-    BridgePauseFailed {
-        error: bridge_control::BridgeControlErrorInfo,
-    },
-    BridgeResumeStart,
-    BridgeResumed,
-    BridgeResumeFailed {
-        error: bridge_control::BridgeControlErrorInfo,
-    },
-
-    HexLoaded {
-        bytes: usize,
-        blocks: usize,
-    },
-
-    TargetStart {
-        target_id: String,
-        kind: TargetKind,
-    },
-    TargetDone {
-        target_id: String,
-        ok: bool,
-        message: Option<String>,
-    },
-
-    SoftReboot {
-        target_id: String,
-        port: String,
-    },
-    SoftRebootSkipped {
-        target_id: String,
-        error: String,
-    },
-    HalfKayAppeared {
-        target_id: String,
-        path: String,
-    },
-    HalfKayOpen {
-        target_id: String,
-        path: String,
-    },
-
-    Block {
-        target_id: String,
-        index: usize,
-        total: usize,
-        addr: usize,
-    },
-    Retry {
-        target_id: String,
-        addr: usize,
-        attempt: u32,
-        retries: u32,
-        error: String,
-    },
-    Boot {
-        target_id: String,
-    },
-    Done {
-        target_id: String,
-    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -226,7 +145,7 @@ pub fn flash_teensy41<F>(
     on_event: F,
 ) -> Result<(), FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     flash_teensy41_with_selection(hex_path, opts, FlashSelection::Auto, on_event)
 }
@@ -244,12 +163,12 @@ pub fn plan_teensy41_with_selection<F>(
     mut on_event: F,
 ) -> Result<FlashPlan, FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     let fw = hex::FirmwareImage::load_teensy41(hex_path)
         .map_err(|e| FlashError::InvalidHex { source: e })?;
 
-    on_event(FlashEvent::HexLoaded {
+    on_event(OperationEvent::HexLoaded {
         bytes: fw.byte_count,
         blocks: fw.num_blocks,
     });
@@ -278,7 +197,7 @@ pub fn flash_teensy41_with_selection<F>(
     mut on_event: F,
 ) -> Result<(), FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     let plan = plan_teensy41_with_selection(hex_path, opts, selection, &mut on_event)?;
     let fw = plan.firmware;
@@ -286,19 +205,19 @@ where
     let needs_serial = plan.needs_serial;
     let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
     if needs_serial {
-        on_event(FlashEvent::BridgePauseStart);
+        on_event(OperationEvent::BridgePauseStart);
         let paused = bridge_control::pause_oc_bridge(&opts.bridge);
         match &paused.outcome {
             bridge_control::BridgePauseOutcome::Paused(info) => {
-                on_event(FlashEvent::BridgePaused { info: info.clone() });
+                on_event(OperationEvent::BridgePaused { info: info.clone() });
             }
             bridge_control::BridgePauseOutcome::Skipped(reason) => {
-                on_event(FlashEvent::BridgePauseSkipped {
+                on_event(OperationEvent::BridgePauseSkipped {
                     reason: reason.clone(),
                 });
             }
             bridge_control::BridgePauseOutcome::Failed(error) => {
-                on_event(FlashEvent::BridgePauseFailed {
+                on_event(OperationEvent::BridgePauseFailed {
                     error: error.clone(),
                 });
             }
@@ -313,7 +232,7 @@ where
 
     for target in selected {
         let target_id = target.id();
-        on_event(FlashEvent::TargetStart {
+        on_event(OperationEvent::TargetStart {
             target_id: target_id.clone(),
             kind: target.kind(),
         });
@@ -321,7 +240,7 @@ where
         let r = flash_one_target(&target, &target_id, &fw, opts, &mut on_event);
         match r {
             Ok(()) => {
-                on_event(FlashEvent::TargetDone {
+                on_event(OperationEvent::TargetDone {
                     target_id,
                     ok: true,
                     message: None,
@@ -329,7 +248,7 @@ where
             }
             Err(e) => {
                 failed += 1;
-                on_event(FlashEvent::TargetDone {
+                on_event(OperationEvent::TargetDone {
                     target_id: target_id.clone(),
                     ok: false,
                     message: Some(e.to_string()),
@@ -352,11 +271,11 @@ where
     };
 
     if let Some(mut g) = bridge_guard {
-        on_event(FlashEvent::BridgeResumeStart);
+        on_event(OperationEvent::BridgeResumeStart);
         let hint = g.resume_hint();
         match g.resume() {
-            Ok(()) => on_event(FlashEvent::BridgeResumed),
-            Err(e) => on_event(FlashEvent::BridgeResumeFailed {
+            Ok(()) => on_event(OperationEvent::BridgeResumed),
+            Err(e) => on_event(OperationEvent::BridgeResumeFailed {
                 error: bridge_control::BridgeControlErrorInfo {
                     message: format!("bridge resume failed: {e}"),
                     hint,
@@ -373,9 +292,9 @@ fn discover_targets_for_flash<F>(
     on_event: &mut F,
 ) -> Result<Vec<Target>, FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
-    on_event(FlashEvent::DiscoverStart);
+    on_event(OperationEvent::DiscoverStart);
 
     let start = Instant::now();
     loop {
@@ -383,12 +302,12 @@ where
             targets::discover_targets().map_err(|e| FlashError::DiscoveryFailed { source: e })?;
 
         for (i, t) in targets.iter().cloned().enumerate() {
-            on_event(FlashEvent::TargetDetected {
+            on_event(OperationEvent::TargetDetected {
                 index: i,
                 target: t,
             });
         }
-        on_event(FlashEvent::DiscoverDone {
+        on_event(OperationEvent::DiscoverDone {
             count: targets.len(),
         });
 
@@ -415,7 +334,7 @@ pub(crate) fn select_targets<F>(
     on_event: &mut F,
 ) -> Result<Vec<Target>, FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     if targets.is_empty() {
         return Err(FlashError::NoTargets);
@@ -494,7 +413,7 @@ where
     };
 
     if emit_selected_event && selected.len() == 1 {
-        on_event(FlashEvent::TargetSelected {
+        on_event(OperationEvent::TargetSelected {
             target_id: selected[0].id(),
         });
     }
@@ -510,7 +429,7 @@ fn flash_one_target<F>(
     on_event: &mut F,
 ) -> Result<(), FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     match target {
         Target::HalfKay(t) => flash_halfkay_path(&t.path, target_id, fw, opts, on_event),
@@ -524,14 +443,14 @@ where
             // 2) reboot selected serial port
             match serial_reboot::soft_reboot_port(&t.port_name) {
                 Ok(()) => {
-                    on_event(FlashEvent::SoftReboot {
+                    on_event(OperationEvent::SoftReboot {
                         target_id: target_id.to_string(),
                         port: t.port_name.clone(),
                     });
                     std::thread::sleep(opts.soft_reboot_delay);
                 }
                 Err(e) => {
-                    on_event(FlashEvent::SoftRebootSkipped {
+                    on_event(OperationEvent::SoftRebootSkipped {
                         target_id: target_id.to_string(),
                         error: e.to_string(),
                     });
@@ -550,7 +469,7 @@ where
                         message: e.to_string(),
                     })?;
 
-            on_event(FlashEvent::HalfKayAppeared {
+            on_event(OperationEvent::HalfKayAppeared {
                 target_id: target_id.to_string(),
                 path: hk_path.clone(),
             });
@@ -569,21 +488,21 @@ fn flash_halfkay_path<F>(
     on_event: &mut F,
 ) -> Result<(), FlashError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     let mut dev = halfkay::open_by_path(path).map_err(|e| FlashError::OpenHalfKay {
         path: path.to_string(),
         source: e,
     })?;
 
-    on_event(FlashEvent::HalfKayOpen {
+    on_event(OperationEvent::HalfKayOpen {
         target_id: target_id.to_string(),
         path: dev.path.clone(),
     });
 
     let total_to_write = fw.blocks_to_write.len();
     for (i, block_addr) in fw.blocks_to_write.iter().copied().enumerate() {
-        on_event(FlashEvent::Block {
+        on_event(OperationEvent::Block {
             target_id: target_id.to_string(),
             index: i,
             total: total_to_write,
@@ -604,7 +523,7 @@ where
                         });
                     }
 
-                    on_event(FlashEvent::Retry {
+                    on_event(OperationEvent::Retry {
                         target_id: target_id.to_string(),
                         addr: block_addr,
                         attempt,
@@ -627,13 +546,13 @@ where
     }
 
     if !opts.no_reboot {
-        on_event(FlashEvent::Boot {
+        on_event(OperationEvent::Boot {
             target_id: target_id.to_string(),
         });
         let _ = halfkay::boot_teensy41(&dev);
     }
 
-    on_event(FlashEvent::Done {
+    on_event(OperationEvent::Done {
         target_id: target_id.to_string(),
     });
     Ok(())
@@ -684,7 +603,7 @@ mod tests {
     #[test]
     fn select_targets_auto_prefers_single_halfkay() {
         let targets = vec![serial("COM5"), halfkay("HK1"), serial("COM6")];
-        let mut events: Vec<FlashEvent> = Vec::new();
+        let mut events: Vec<OperationEvent> = Vec::new();
 
         let selected = select_targets(FlashSelection::Auto, None, &targets, true, &mut |e| {
             events.push(e)
@@ -694,14 +613,14 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id(), "halfkay:HK1");
         assert!(events.iter().any(
-            |e| matches!(e, FlashEvent::TargetSelected { target_id } if target_id == "halfkay:HK1")
+            |e| matches!(e, OperationEvent::TargetSelected { target_id } if target_id == "halfkay:HK1")
         ));
     }
 
     #[test]
     fn select_targets_auto_prefers_named_serial_port() {
         let targets = vec![serial("COM5"), serial("COM6")];
-        let mut events: Vec<FlashEvent> = Vec::new();
+        let mut events: Vec<OperationEvent> = Vec::new();
 
         let selected = select_targets(
             FlashSelection::Auto,
@@ -715,14 +634,14 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id(), "serial:COM6");
         assert!(events.iter().any(
-            |e| matches!(e, FlashEvent::TargetSelected { target_id } if target_id == "serial:COM6")
+            |e| matches!(e, OperationEvent::TargetSelected { target_id } if target_id == "serial:COM6")
         ));
     }
 
     #[test]
     fn select_targets_does_not_emit_selected_when_disabled() {
         let targets = vec![serial("COM6")];
-        let mut events: Vec<FlashEvent> = Vec::new();
+        let mut events: Vec<OperationEvent> = Vec::new();
 
         let selected = select_targets(FlashSelection::Auto, None, &targets, false, &mut |e| {
             events.push(e)
@@ -732,6 +651,6 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(!events
             .iter()
-            .any(|e| matches!(e, FlashEvent::TargetSelected { .. })));
+            .any(|e| matches!(e, OperationEvent::TargetSelected { .. })));
     }
 }

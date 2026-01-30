@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::api::{FlashEvent, FlashSelection};
+use crate::api::FlashSelection;
+use crate::operation::OperationEvent;
 use crate::{
     bootloader, bridge_control, halfkay, serial_reboot, targets,
     targets::{Target, TargetKind},
@@ -100,17 +101,17 @@ pub fn reboot_teensy41_with_selection<F>(
     mut on_event: F,
 ) -> Result<(), RebootError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
-    on_event(FlashEvent::DiscoverStart);
+    on_event(OperationEvent::DiscoverStart);
     let targets =
         targets::discover_targets().map_err(|e| RebootError::DiscoveryFailed { source: e })?;
 
     for (index, target) in targets.iter().cloned().enumerate() {
-        on_event(FlashEvent::TargetDetected { index, target });
+        on_event(OperationEvent::TargetDetected { index, target });
     }
 
-    on_event(FlashEvent::DiscoverDone {
+    on_event(OperationEvent::DiscoverDone {
         count: targets.len(),
     });
 
@@ -138,19 +139,19 @@ where
     let needs_serial = selected.iter().any(|t| t.kind() == TargetKind::Serial);
     let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
     if needs_serial {
-        on_event(FlashEvent::BridgePauseStart);
+        on_event(OperationEvent::BridgePauseStart);
         let paused = bridge_control::pause_oc_bridge(&opts.bridge);
         match &paused.outcome {
             bridge_control::BridgePauseOutcome::Paused(info) => {
-                on_event(FlashEvent::BridgePaused { info: info.clone() });
+                on_event(OperationEvent::BridgePaused { info: info.clone() });
             }
             bridge_control::BridgePauseOutcome::Skipped(reason) => {
-                on_event(FlashEvent::BridgePauseSkipped {
+                on_event(OperationEvent::BridgePauseSkipped {
                     reason: reason.clone(),
                 });
             }
             bridge_control::BridgePauseOutcome::Failed(error) => {
-                on_event(FlashEvent::BridgePauseFailed {
+                on_event(OperationEvent::BridgePauseFailed {
                     error: error.clone(),
                 });
             }
@@ -166,7 +167,7 @@ where
 
     for target in selected {
         let target_id = target.id();
-        on_event(FlashEvent::TargetStart {
+        on_event(OperationEvent::TargetStart {
             target_id: target_id.clone(),
             kind: target.kind(),
         });
@@ -174,7 +175,7 @@ where
         let r = reboot_one_target(&target, &target_id, opts, &mut on_event);
         match r {
             Ok(()) => {
-                on_event(FlashEvent::TargetDone {
+                on_event(OperationEvent::TargetDone {
                     target_id,
                     ok: true,
                     message: None,
@@ -187,7 +188,7 @@ where
                         ambiguous_message = Some(message.clone());
                     }
                 }
-                on_event(FlashEvent::TargetDone {
+                on_event(OperationEvent::TargetDone {
                     target_id: target_id.clone(),
                     ok: false,
                     message: Some(e.to_string()),
@@ -212,11 +213,11 @@ where
     };
 
     if let Some(mut g) = bridge_guard {
-        on_event(FlashEvent::BridgeResumeStart);
+        on_event(OperationEvent::BridgeResumeStart);
         let hint = g.resume_hint();
         match g.resume() {
-            Ok(()) => on_event(FlashEvent::BridgeResumed),
-            Err(e) => on_event(FlashEvent::BridgeResumeFailed {
+            Ok(()) => on_event(OperationEvent::BridgeResumed),
+            Err(e) => on_event(OperationEvent::BridgeResumeFailed {
                 error: bridge_control::BridgeControlErrorInfo {
                     message: format!("bridge resume failed: {e}"),
                     hint,
@@ -235,11 +236,11 @@ fn reboot_one_target<F>(
     on_event: &mut F,
 ) -> Result<(), RebootError>
 where
-    F: FnMut(FlashEvent),
+    F: FnMut(OperationEvent),
 {
     match target {
         Target::HalfKay(t) => {
-            on_event(FlashEvent::HalfKayOpen {
+            on_event(OperationEvent::HalfKayOpen {
                 target_id: target_id.to_string(),
                 path: t.path.clone(),
             });
@@ -254,14 +255,14 @@ where
 
             match serial_reboot::soft_reboot_port(&t.port_name) {
                 Ok(()) => {
-                    on_event(FlashEvent::SoftReboot {
+                    on_event(OperationEvent::SoftReboot {
                         target_id: target_id.to_string(),
                         port: t.port_name.clone(),
                     });
                     std::thread::sleep(opts.soft_reboot_delay);
                 }
                 Err(e) => {
-                    on_event(FlashEvent::SoftRebootSkipped {
+                    on_event(OperationEvent::SoftRebootSkipped {
                         target_id: target_id.to_string(),
                         error: e.to_string(),
                     });
@@ -274,7 +275,7 @@ where
 
             let path = wait_for_new_halfkay(&before, opts.wait_timeout, opts.poll_interval)?;
 
-            on_event(FlashEvent::HalfKayAppeared {
+            on_event(OperationEvent::HalfKayAppeared {
                 target_id: target_id.to_string(),
                 path: path.clone(),
             });
