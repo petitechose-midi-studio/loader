@@ -360,6 +360,22 @@ fn ambiguous_help_includes_targets() {
 }
 
 #[test]
+fn list_target_json_includes_index_and_id() {
+    let t = targets::Target::Serial(SerialTarget {
+        port_name: "COM6".to_string(),
+        vid: 0x16C0,
+        pid: 0x0483,
+        serial_number: None,
+        manufacturer: None,
+        product: None,
+    });
+
+    let v = super::target_to_value(0, &t);
+    assert_eq!(v.get("index").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(v.get("id").and_then(|v| v.as_str()), Some("serial:COM6"));
+}
+
+#[test]
 fn dry_run_json_contract() {
     let ev = super::json::dry_run_to_json(super::DryRunSummary {
         bytes: 123,
