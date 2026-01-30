@@ -9,7 +9,7 @@ use midi_studio_loader::targets::{self, HalfKayTarget, SerialTarget, TargetKind}
 
 use super::human::HumanOutput;
 use super::json::JsonOutput;
-use crate::output::{JsonProgressMode, OutputOptions};
+use crate::output::{JsonProgressMode, OperationSummary, OutputOptions};
 
 fn keys(v: &serde_json::Value) -> BTreeSet<String> {
     v.as_object()
@@ -474,5 +474,47 @@ fn doctor_json_contract_minimal() {
     assert_eq!(
         v.get("targets").and_then(|v| v.as_array()).map(|a| a.len()),
         Some(1)
+    );
+}
+
+#[test]
+fn operation_summary_json_contract() {
+    let ev = super::json::operation_summary_to_json(OperationSummary {
+        operation: "flash",
+        exit_code: 0,
+        message: None,
+        targets_ok: vec!["serial:COM6".to_string()],
+        targets_failed: Vec::new(),
+        blocks: 10,
+        retries: 0,
+        bridge_pause: "paused".to_string(),
+        bridge_method: Some("control".to_string()),
+        bridge_reason: None,
+    });
+    let v = serde_json::to_value(&ev).unwrap();
+    assert_eq!(
+        v.get("event").and_then(|v| v.as_str()),
+        Some("operation_summary")
+    );
+    assert_eq!(v.get("operation").and_then(|v| v.as_str()), Some("flash"));
+    assert_eq!(v.get("ok").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(v.get("exit_code").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(v.get("targets_total").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(v.get("blocks").and_then(|v| v.as_u64()), Some(10));
+    assert_eq!(v.get("retries").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(
+        v.get("bridge_pause").and_then(|v| v.as_str()),
+        Some("paused")
+    );
+    assert_eq!(
+        v.get("bridge_method").and_then(|v| v.as_str()),
+        Some("control")
+    );
+    assert_eq!(
+        v.get("targets_ok_ids")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.get(0))
+            .and_then(|v| v.as_str()),
+        Some("serial:COM6")
     );
 }

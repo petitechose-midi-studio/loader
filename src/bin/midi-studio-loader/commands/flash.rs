@@ -6,7 +6,7 @@ use midi_studio_loader::selector;
 use crate::cli;
 use crate::context;
 use crate::exit_codes;
-use crate::output::{DryRunSummary, Event, Reporter};
+use crate::output::{DryRunSummary, Event, OperationRecorder, Reporter};
 
 pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
     let wait_timeout = context::wait_timeout(args.wait_timeout_ms);
@@ -45,17 +45,24 @@ pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
         return dry_run(&args.hex, &opts, selection, out);
     }
 
+    let mut rec = OperationRecorder::new("flash");
     let r = api::flash_teensy41_with_selection(&args.hex, &opts, selection, |ev| {
+        rec.observe(&ev);
         out.emit(Event::Operation(ev))
     });
 
     match r {
-        Ok(()) => exit_codes::EXIT_OK,
+        Ok(()) => {
+            let code = exit_codes::EXIT_OK;
+            out.emit(Event::OperationSummary(rec.finish(code, None)));
+            code
+        }
         Err(e) => {
             let code = map_flash_error(&e);
+            let msg = e.to_string();
             out.emit(Event::Error {
                 code,
-                message: e.to_string(),
+                message: msg.clone(),
             });
             if matches!(
                 e,
@@ -65,6 +72,7 @@ pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
             ) {
                 out.emit(Event::HintAmbiguousTargets);
             }
+            out.emit(Event::OperationSummary(rec.finish(code, Some(msg))));
             code
         }
     }

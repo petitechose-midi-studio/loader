@@ -54,11 +54,120 @@ pub struct DoctorReport {
 #[derive(Debug, Clone)]
 pub enum Event {
     Operation(OperationEvent),
+    OperationSummary(OperationSummary),
     DryRun(DryRunSummary),
     ListTargets(Vec<targets::Target>),
     Doctor(DoctorReport),
     Error { code: i32, message: String },
     HintAmbiguousTargets,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperationSummary {
+    pub operation: &'static str,
+    pub exit_code: i32,
+    pub message: Option<String>,
+
+    pub targets_ok: Vec<String>,
+    pub targets_failed: Vec<String>,
+
+    pub blocks: u64,
+    pub retries: u64,
+
+    pub bridge_pause: String,
+    pub bridge_method: Option<String>,
+    pub bridge_reason: Option<String>,
+}
+
+pub struct OperationRecorder {
+    operation: &'static str,
+    targets_ok: Vec<String>,
+    targets_failed: Vec<String>,
+    blocks: u64,
+    retries: u64,
+    bridge_pause: String,
+    bridge_method: Option<String>,
+    bridge_reason: Option<String>,
+}
+
+impl OperationRecorder {
+    pub fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            targets_ok: Vec::new(),
+            targets_failed: Vec::new(),
+            blocks: 0,
+            retries: 0,
+            bridge_pause: "not_attempted".to_string(),
+            bridge_method: None,
+            bridge_reason: None,
+        }
+    }
+
+    pub fn observe(&mut self, ev: &OperationEvent) {
+        match ev {
+            OperationEvent::BridgePauseStart => {
+                self.bridge_pause = "attempted".to_string();
+            }
+            OperationEvent::BridgePaused { info } => {
+                self.bridge_pause = "paused".to_string();
+                self.bridge_method = Some(
+                    match info.method {
+                        bridge_control::BridgePauseMethod::Control => "control",
+                        bridge_control::BridgePauseMethod::Service => "service",
+                        bridge_control::BridgePauseMethod::Process => "process",
+                    }
+                    .to_string(),
+                );
+            }
+            OperationEvent::BridgePauseSkipped { reason } => {
+                self.bridge_pause = "skipped".to_string();
+                self.bridge_reason = Some(
+                    match reason {
+                        bridge_control::BridgePauseSkipReason::Disabled => "disabled",
+                        bridge_control::BridgePauseSkipReason::NotRunning => "not_running",
+                        bridge_control::BridgePauseSkipReason::NotInstalled => "not_installed",
+                        bridge_control::BridgePauseSkipReason::ProcessNotRestartable => {
+                            "process_not_restartable"
+                        }
+                    }
+                    .to_string(),
+                );
+            }
+            OperationEvent::BridgePauseFailed { .. } => {
+                self.bridge_pause = "failed".to_string();
+            }
+            OperationEvent::TargetDone { target_id, ok, .. } => {
+                if *ok {
+                    self.targets_ok.push(target_id.clone());
+                } else {
+                    self.targets_failed.push(target_id.clone());
+                }
+            }
+            OperationEvent::Block { .. } => {
+                self.blocks = self.blocks.saturating_add(1);
+            }
+            OperationEvent::Retry { .. } => {
+                self.retries = self.retries.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn finish(self, exit_code: i32, message: Option<String>) -> OperationSummary {
+        OperationSummary {
+            operation: self.operation,
+            exit_code,
+            message,
+            targets_ok: self.targets_ok,
+            targets_failed: self.targets_failed,
+            blocks: self.blocks,
+            retries: self.retries,
+            bridge_pause: self.bridge_pause,
+            bridge_method: self.bridge_method,
+            bridge_reason: self.bridge_reason,
+        }
+    }
 }
 
 pub trait Reporter {

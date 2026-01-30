@@ -302,6 +302,7 @@ impl Reporter for HumanOutput {
     fn emit(&mut self, event: Event) {
         match event {
             Event::Operation(ev) => self.on_operation_event(ev),
+            Event::OperationSummary(_) => {}
             Event::DryRun(summary) => emit_dry_run(summary, self),
             Event::ListTargets(targets) => emit_list_targets(&targets, self),
             Event::Doctor(report) => emit_doctor(report, self),

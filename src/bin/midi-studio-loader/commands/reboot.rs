@@ -4,7 +4,7 @@ use midi_studio_loader::{api, reboot_api};
 use crate::cli;
 use crate::context;
 use crate::exit_codes;
-use crate::output::{Event, Reporter};
+use crate::output::{Event, OperationRecorder, Reporter};
 
 pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
     let selection = if args.all {
@@ -32,20 +32,27 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
         ..Default::default()
     };
 
+    let mut rec = OperationRecorder::new("reboot");
     let r = reboot_api::reboot_teensy41_with_selection(&opts, selection, |ev| {
+        rec.observe(&ev);
         out.emit(Event::Operation(ev))
     });
     match r {
-        Ok(()) => exit_codes::EXIT_OK,
+        Ok(()) => {
+            let code = exit_codes::EXIT_OK;
+            out.emit(Event::OperationSummary(rec.finish(code, None)));
+            code
+        }
         Err(e) => {
             let code = match e.kind() {
                 reboot_api::RebootErrorKind::NoDevice => exit_codes::EXIT_NO_DEVICE,
                 reboot_api::RebootErrorKind::AmbiguousTarget => exit_codes::EXIT_AMBIGUOUS,
                 reboot_api::RebootErrorKind::Unexpected => exit_codes::EXIT_UNEXPECTED,
             };
+            let msg = e.to_string();
             out.emit(Event::Error {
                 code,
-                message: e.to_string(),
+                message: msg.clone(),
             });
             if matches!(
                 e,
@@ -55,6 +62,7 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
             ) {
                 out.emit(Event::HintAmbiguousTargets);
             }
+            out.emit(Event::OperationSummary(rec.finish(code, Some(msg))));
             code
         }
     }

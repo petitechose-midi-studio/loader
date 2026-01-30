@@ -4,7 +4,8 @@ use std::time::Instant;
 use midi_studio_loader::{operation::OperationEvent, targets};
 
 use crate::output::{
-    target_to_value, DoctorReport, DryRunSummary, Event, JsonProgressMode, OutputOptions, Reporter,
+    target_to_value, DoctorReport, DryRunSummary, Event, JsonProgressMode, OperationSummary,
+    OutputOptions, Reporter,
 };
 
 #[derive(serde::Serialize)]
@@ -96,6 +97,9 @@ impl Reporter for JsonOutput {
     fn emit(&mut self, event: Event) {
         match event {
             Event::Operation(ev) => self.emit_operation(ev),
+            Event::OperationSummary(summary) => {
+                self.json_event(operation_summary_to_json(summary));
+            }
             Event::DryRun(summary) => self.json_event(dry_run_to_json(summary)),
             Event::ListTargets(targets) => {
                 for (i, t) in targets.iter().enumerate() {
@@ -158,6 +162,54 @@ pub fn dry_run_to_json(summary: DryRunSummary) -> JsonEvent {
                     .collect(),
             ),
         )
+}
+
+pub fn operation_summary_to_json(summary: OperationSummary) -> JsonEvent {
+    let OperationSummary {
+        operation,
+        exit_code,
+        message,
+        targets_ok,
+        targets_failed,
+        blocks,
+        retries,
+        bridge_pause,
+        bridge_method,
+        bridge_reason,
+    } = summary;
+
+    let total = targets_ok.len() + targets_failed.len();
+
+    let mut ev = JsonEvent::status("operation_summary")
+        .with_str("operation", operation)
+        .with_u64("ok", if exit_code == 0 { 1 } else { 0 })
+        .with_u64("exit_code", exit_code.max(0) as u64)
+        .with_u64("targets_total", total as u64)
+        .with_u64("targets_ok", targets_ok.len() as u64)
+        .with_u64("targets_failed", targets_failed.len() as u64)
+        .with_u64("blocks", blocks)
+        .with_u64("retries", retries)
+        .with_str("bridge_pause", &bridge_pause)
+        .with_value(
+            "targets_ok_ids",
+            serde_json::Value::Array(targets_ok.into_iter().map(Into::into).collect()),
+        )
+        .with_value(
+            "targets_failed_ids",
+            serde_json::Value::Array(targets_failed.into_iter().map(Into::into).collect()),
+        );
+
+    if let Some(m) = &bridge_method {
+        ev = ev.with_str("bridge_method", m);
+    }
+    if let Some(r) = &bridge_reason {
+        ev = ev.with_str("bridge_reason", r);
+    }
+    if let Some(msg) = &message {
+        ev = ev.with_str("message", msg);
+    }
+
+    ev
 }
 
 pub fn doctor_to_json(report: DoctorReport) -> JsonEvent {
