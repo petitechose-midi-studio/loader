@@ -5,6 +5,9 @@ use midi_studio_loader::{api, targets};
 pub mod human;
 pub mod json;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy)]
 pub struct OutputOptions {
     pub json: bool,
