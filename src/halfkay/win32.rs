@@ -119,7 +119,13 @@ fn write_report_once(
 
             let r = WaitForSingleObject(event, timeout_ms);
             if r == WAIT_TIMEOUT {
+                // Cancel is asynchronous. We must wait for completion before returning,
+                // otherwise the kernel may still access our stack-allocated OVERLAPPED.
                 let _ = CancelIoEx(handle, &mut ov as *mut OVERLAPPED);
+
+                let mut _n_cancel: u32 = 0;
+                let _ = GetOverlappedResult(handle, &mut ov as *mut OVERLAPPED, &mut _n_cancel, 1);
+
                 return Err(win32_error("WriteFile timeout", WAIT_TIMEOUT));
             }
             if r != WAIT_OBJECT_0 {
