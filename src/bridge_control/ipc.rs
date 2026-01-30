@@ -81,6 +81,8 @@ struct ControlResp {
 #[cfg(feature = "cli")]
 #[derive(Debug, Deserialize)]
 struct ControlRespJson {
+    #[serde(default)]
+    schema: Option<u32>,
     ok: bool,
     paused: bool,
     #[serde(default)]
@@ -107,7 +109,8 @@ fn control_send(
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
 
-    let req = format!("{{\"cmd\":\"{cmd}\"}}\n");
+    // Forward-compatible request format. oc-bridge should ignore unknown fields.
+    let req = format!("{{\"schema\":1,\"cmd\":\"{cmd}\"}}\n");
     stream
         .write_all(req.as_bytes())
         .map_err(|e| BridgeControlError::CommandFailed {
@@ -133,6 +136,14 @@ fn parse_control_response(s: &str) -> Result<ControlResp, BridgeControlError> {
     #[cfg(feature = "cli")]
     {
         if let Ok(v) = serde_json::from_str::<ControlRespJson>(line) {
+            // Current protocol schema is 1. We accept missing schema (legacy), and we
+            // accept other schema versions for forward compatibility as long as fields
+            // we need are present.
+            if let Some(schema) = v.schema {
+                if schema == 0 {
+                    // reserved
+                }
+            }
             return Ok(ControlResp {
                 ok: v.ok,
                 paused: v.paused,
