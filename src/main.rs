@@ -32,6 +32,9 @@ enum Command {
 
     /// List detected targets (HalfKay + PJRC USB serial).
     List(ListArgs),
+
+    /// Diagnose target detection and bridge coordination.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Parser)]
@@ -101,6 +104,10 @@ struct FlashArgs {
     #[arg(long)]
     json: bool,
 
+    /// Validate inputs and selection without flashing.
+    #[arg(long)]
+    dry_run: bool,
+
     /// More logs to stderr.
     #[arg(long, short)]
     verbose: bool,
@@ -109,6 +116,33 @@ struct FlashArgs {
 #[derive(Parser)]
 struct ListArgs {
     /// Emit JSON line output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct DoctorArgs {
+    /// Skip probing oc-bridge IPC.
+    #[arg(long)]
+    no_bridge_control: bool,
+
+    /// Override the bridge service identifier.
+    ///
+    /// - Windows: service name (default: OpenControlBridge)
+    /// - Linux: systemd user unit (default: open-control-bridge)
+    /// - macOS: launchd label (default: com.petitechose.open-control-bridge)
+    #[arg(long)]
+    bridge_service_id: Option<String>,
+
+    /// Local oc-bridge control port (pause/resume IPC).
+    #[arg(long, default_value_t = 7999)]
+    bridge_control_port: u16,
+
+    /// Max time to wait for oc-bridge IPC.
+    #[arg(long, default_value_t = 2500)]
+    bridge_control_timeout_ms: u64,
+
+    /// Emit JSON output.
     #[arg(long)]
     json: bool,
 }
@@ -150,9 +184,158 @@ fn main() {
         Command::Flash(args) => cmd_flash(args),
         Command::List(args) => cmd_list(args),
         Command::Reboot(args) => cmd_reboot(args),
+        Command::Doctor(args) => cmd_doctor(args),
     };
 
     process::exit(exit_code);
+}
+
+fn cmd_doctor(args: DoctorArgs) -> i32 {
+    let service_id = args
+        .bridge_service_id
+        .clone()
+        .unwrap_or_else(midi_studio_loader::bridge_control::default_service_id_for_platform);
+
+    let targets = match targets::discover_targets() {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!("target discovery failed: {e}");
+            if args.json {
+                emit_json(
+                    &JsonEvent::status("error")
+                        .with_u64("code", EXIT_UNEXPECTED as u64)
+                        .with_str("message", &msg),
+                );
+            }
+            eprintln!("error: {msg}");
+            return EXIT_UNEXPECTED;
+        }
+    };
+
+    let svc_status = midi_studio_loader::bridge_control::service_status(&service_id);
+    let procs = midi_studio_loader::bridge_control::list_oc_bridge_processes();
+
+    let control_timeout = Duration::from_millis(args.bridge_control_timeout_ms);
+    let control = if args.no_bridge_control {
+        None
+    } else {
+        Some(midi_studio_loader::bridge_control::control_status(
+            args.bridge_control_port,
+            control_timeout,
+        ))
+    };
+
+    if args.json {
+        let targets_val = serde_json::Value::Array(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut v = serde_json::to_value(t)
+                        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                    if let serde_json::Value::Object(obj) = &mut v {
+                        obj.insert("index".to_string(), serde_json::Value::from(i as u64));
+                        obj.insert("id".to_string(), serde_json::Value::from(t.id()));
+                    }
+                    v
+                })
+                .collect(),
+        );
+
+        let mut ev = JsonEvent::status("doctor")
+            .with_str("service_id", &service_id)
+            .with_value("targets", targets_val)
+            .with_value(
+                "processes",
+                serde_json::to_value(&procs)
+                    .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+            );
+
+        ev = match &control {
+            None => ev.with_u64("control_checked", 0),
+            Some(Ok(st)) => ev.with_u64("control_checked", 1).with_value(
+                "control",
+                serde_json::to_value(st)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            ),
+            Some(Err(e)) => ev
+                .with_u64("control_checked", 1)
+                .with_str("control_error", &e.to_string()),
+        };
+
+        ev = match svc_status {
+            Ok(s) => ev.with_value(
+                "service_status",
+                serde_json::to_value(s).unwrap_or_else(|_| serde_json::Value::from("unknown")),
+            ),
+            Err(e) => ev.with_str("service_error", &e.to_string()),
+        };
+
+        emit_json(&ev);
+        return EXIT_OK;
+    }
+
+    eprintln!("midi-studio-loader doctor");
+    eprintln!("targets: {}", targets.len());
+    for (i, t) in targets.iter().enumerate() {
+        match t {
+            targets::Target::HalfKay(hk) => {
+                eprintln!("[{i}] halfkay {} {:04X}:{:04X}", t.id(), hk.vid, hk.pid);
+            }
+            targets::Target::Serial(s) => {
+                eprintln!(
+                    "[{i}] serial  {} {:04X}:{:04X} {}",
+                    t.id(),
+                    s.vid,
+                    s.pid,
+                    s.product.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "oc-bridge control: 127.0.0.1:{} (timeout {}ms){}",
+        args.bridge_control_port,
+        args.bridge_control_timeout_ms,
+        if args.no_bridge_control {
+            " (skipped)"
+        } else {
+            ""
+        }
+    );
+    if let Some(control) = control {
+        match control {
+            Ok(st) => {
+                eprintln!(
+                    "  ok={} paused={} serial_open={:?}",
+                    st.ok, st.paused, st.serial_open
+                );
+                if let Some(m) = st.message {
+                    eprintln!("  message: {m}");
+                }
+            }
+            Err(e) => eprintln!("  error: {e}"),
+        }
+    }
+
+    eprintln!("oc-bridge service: {service_id}");
+    match svc_status {
+        Ok(s) => eprintln!("  status: {s:?}"),
+        Err(e) => eprintln!("  error: {e}"),
+    }
+
+    eprintln!("oc-bridge processes: {}", procs.len());
+    for p in procs {
+        eprintln!(
+            "  pid={} restartable={} exe={}",
+            p.pid,
+            if p.restartable { "yes" } else { "no" },
+            p.exe.as_deref().unwrap_or("")
+        );
+    }
+
+    EXIT_OK
 }
 
 fn cmd_reboot(args: RebootArgs) -> i32 {
@@ -534,6 +717,69 @@ fn cmd_flash(args: FlashArgs) -> i32 {
     } else {
         api::FlashSelection::Auto
     };
+
+    if args.dry_run {
+        let r = api::plan_teensy41_with_selection(&args.hex, &opts, selection, |ev| {
+            handle_flash_event(&args, ev)
+        });
+        return match r {
+            Ok(plan) => {
+                if args.json {
+                    emit_json(
+                        &JsonEvent::status("dry_run")
+                            .with_u64("bytes", plan.firmware.byte_count as u64)
+                            .with_u64("blocks", plan.firmware.num_blocks as u64)
+                            .with_u64(
+                                "blocks_to_write",
+                                plan.firmware.blocks_to_write.len() as u64,
+                            )
+                            .with_u64("targets", plan.selected_targets.len() as u64)
+                            .with_u64("needs_serial", if plan.needs_serial { 1 } else { 0 })
+                            .with_value(
+                                "target_ids",
+                                serde_json::Value::Array(
+                                    plan.selected_targets
+                                        .iter()
+                                        .map(|t| serde_json::Value::from(t.id()))
+                                        .collect(),
+                                ),
+                            ),
+                    );
+                } else {
+                    eprintln!("Dry run OK");
+                    eprintln!(
+                        "Firmware: {} bytes, blocks_to_write={}/{}",
+                        plan.firmware.byte_count,
+                        plan.firmware.blocks_to_write.len(),
+                        plan.firmware.num_blocks
+                    );
+                    eprintln!("Targets: {}", plan.selected_targets.len());
+                    for t in &plan.selected_targets {
+                        eprintln!("- {}", t.id());
+                    }
+                    if plan.needs_serial && opts.bridge.enabled {
+                        eprintln!(
+                            "Bridge: would pause/resume oc-bridge (control port {})",
+                            opts.bridge.control_port
+                        );
+                    }
+                }
+
+                EXIT_OK
+            }
+            Err(e) => {
+                let code = match e.kind() {
+                    api::FlashErrorKind::NoDevice => EXIT_NO_DEVICE,
+                    api::FlashErrorKind::AmbiguousTarget => EXIT_AMBIGUOUS,
+                    api::FlashErrorKind::InvalidHex => EXIT_INVALID_HEX,
+                    api::FlashErrorKind::WriteFailed => EXIT_WRITE_FAILED,
+                    api::FlashErrorKind::Unexpected => EXIT_UNEXPECTED,
+                };
+                emit_error(&args, code, &e.to_string());
+                code
+            }
+        };
+    }
 
     let r = api::flash_teensy41_with_selection(&args.hex, &opts, selection, |ev| {
         handle_flash_event(&args, ev)

@@ -22,6 +22,12 @@ Flash a firmware (Intel HEX):
 midi-studio-loader flash path/to/firmware.hex
 ```
 
+Validate selection and HEX without flashing:
+
+```bash
+midi-studio-loader flash path/to/firmware.hex --dry-run
+```
+
 If multiple targets are connected, select one:
 
 ```bash
@@ -38,6 +44,12 @@ Enter HalfKay without the button (requires USB Serial in your firmware):
 
 ```bash
 midi-studio-loader reboot --device serial:COM6
+```
+
+Diagnose your setup (targets + oc-bridge status):
+
+```bash
+midi-studio-loader doctor
 ```
 
 Bridge control (optional):

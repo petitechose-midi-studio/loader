@@ -16,7 +16,6 @@ pub struct FirmwareImage {
 impl FirmwareImage {
     pub fn load_teensy41(path: &Path) -> Result<Self, HexError> {
         let mut data = vec![0xFFu8; teensy41::CODE_SIZE];
-        let mut mask = vec![false; teensy41::CODE_SIZE];
         let mut byte_count: usize = 0;
 
         let f = File::open(path).map_err(HexError::Io)?;
@@ -87,7 +86,6 @@ impl FirmwareImage {
                         let abs = map_teensy41_addr(abs)
                             .ok_or(HexError::AddressOutOfRange { line_no, addr: abs })?;
                         data[abs] = b;
-                        mask[abs] = true;
                     }
                 }
                 0x01 => {
@@ -129,7 +127,7 @@ impl FirmwareImage {
                 blocks_to_write.push(start);
                 continue;
             }
-            if !is_block_blank(&data, &mask, start) {
+            if !is_block_blank(&data, start) {
                 blocks_to_write.push(start);
             }
         }
@@ -166,14 +164,9 @@ pub enum HexError {
     AddressOutOfRange { line_no: usize, addr: u32 },
 }
 
-fn is_block_blank(data: &[u8], mask: &[bool], start: usize) -> bool {
+fn is_block_blank(data: &[u8], start: usize) -> bool {
     let end = start + teensy41::BLOCK_SIZE;
-    for i in start..end {
-        if mask[i] && data[i] != 0xFF {
-            return false;
-        }
-    }
-    true
+    data[start..end].iter().all(|b| *b == 0xFF)
 }
 
 fn map_teensy41_addr(addr: u32) -> Option<usize> {

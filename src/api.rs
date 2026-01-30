@@ -231,12 +231,18 @@ where
     flash_teensy41_with_selection(hex_path, opts, FlashSelection::Auto, on_event)
 }
 
-pub fn flash_teensy41_with_selection<F>(
+pub struct FlashPlan {
+    pub firmware: hex::FirmwareImage,
+    pub selected_targets: Vec<Target>,
+    pub needs_serial: bool,
+}
+
+pub fn plan_teensy41_with_selection<F>(
     hex_path: &Path,
     opts: &FlashOptions,
     selection: FlashSelection,
     mut on_event: F,
-) -> Result<(), FlashError>
+) -> Result<FlashPlan, FlashError>
 where
     F: FnMut(FlashEvent),
 {
@@ -250,8 +256,28 @@ where
 
     let targets = discover_targets_for_flash(opts, &mut on_event)?;
     let selected = select_targets(selection, opts, &targets, &mut on_event)?;
-
     let needs_serial = selected.iter().any(|t| t.kind() == TargetKind::Serial);
+
+    Ok(FlashPlan {
+        firmware: fw,
+        selected_targets: selected,
+        needs_serial,
+    })
+}
+
+pub fn flash_teensy41_with_selection<F>(
+    hex_path: &Path,
+    opts: &FlashOptions,
+    selection: FlashSelection,
+    mut on_event: F,
+) -> Result<(), FlashError>
+where
+    F: FnMut(FlashEvent),
+{
+    let plan = plan_teensy41_with_selection(hex_path, opts, selection, &mut on_event)?;
+    let fw = plan.firmware;
+    let selected = plan.selected_targets;
+    let needs_serial = plan.needs_serial;
     let mut bridge_guard: Option<bridge_control::BridgeGuard> = None;
     if needs_serial {
         on_event(FlashEvent::BridgePauseStart);

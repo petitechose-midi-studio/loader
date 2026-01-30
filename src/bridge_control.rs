@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use sysinfo::{Process, System};
+use sysinfo::{Process, ProcessRefreshKind, RefreshKind, System, UpdateKind};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -228,8 +228,13 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
     }
 
     // 2) process fallback (only if restartable)
-    let mut system = System::new_all();
-    system.refresh_processes();
+    let mut system = System::new_with_specifics(
+        RefreshKind::new().with_processes(
+            ProcessRefreshKind::new()
+                .with_exe(UpdateKind::OnlyIfNotSet)
+                .with_cmd(UpdateKind::OnlyIfNotSet),
+        ),
+    );
 
     let processes = find_oc_bridge_processes(&system);
     if processes.is_empty() {
@@ -293,14 +298,15 @@ fn error_info(message: String, hint: Option<String>) -> BridgeControlErrorInfo {
     BridgeControlErrorInfo { message, hint }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServiceStatus {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStatus {
     Running,
     Stopped,
     NotInstalled,
 }
 
-fn default_service_id_for_platform() -> String {
+pub fn default_service_id_for_platform() -> String {
     // Mirrors midi-studio/core/script/pio/oc_service.py.
     #[cfg(windows)]
     {
@@ -377,7 +383,7 @@ fn hint_start_service(service_id: &str) -> String {
     }
 }
 
-fn service_status(service_id: &str) -> Result<ServiceStatus, BridgeControlError> {
+pub fn service_status(service_id: &str) -> Result<ServiceStatus, BridgeControlError> {
     #[cfg(windows)]
     {
         let out = run_capture("sc", &["query", service_id], None)?;
@@ -790,6 +796,27 @@ fn resume(plan: ResumePlan, timeout: Duration) -> Result<(), BridgeControlError>
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BridgeControlStatus {
+    pub ok: bool,
+    pub paused: bool,
+    pub serial_open: Option<bool>,
+    pub message: Option<String>,
+}
+
+pub fn control_status(
+    port: u16,
+    timeout: Duration,
+) -> Result<BridgeControlStatus, BridgeControlError> {
+    let resp = control_send(port, "status", timeout)?;
+    Ok(BridgeControlStatus {
+        ok: resp.ok,
+        paused: resp.paused,
+        serial_open: resp.serial_open,
+        message: resp.message,
+    })
+}
+
 fn control_pause(port: u16, timeout: Duration) -> Result<(), BridgeControlError> {
     let resp = control_send(port, "pause", timeout)?;
     if !resp.ok {
@@ -979,6 +1006,34 @@ struct OcBridgeProcess {
     cmd: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OcBridgeProcessInfo {
+    pub pid: u32,
+    pub exe: Option<String>,
+    pub cmd: Option<Vec<String>>,
+    pub restartable: bool,
+}
+
+pub fn list_oc_bridge_processes() -> Vec<OcBridgeProcessInfo> {
+    let system = System::new_with_specifics(
+        RefreshKind::new().with_processes(
+            ProcessRefreshKind::new()
+                .with_exe(UpdateKind::OnlyIfNotSet)
+                .with_cmd(UpdateKind::OnlyIfNotSet),
+        ),
+    );
+
+    find_oc_bridge_processes(&system)
+        .into_iter()
+        .map(|p| OcBridgeProcessInfo {
+            pid: p.pid_u32,
+            exe: p.exe.as_ref().map(|e| e.to_string_lossy().to_string()),
+            cmd: p.cmd.clone(),
+            restartable: p.exe.is_some(),
+        })
+        .collect()
+}
+
 fn find_oc_bridge_processes(system: &System) -> Vec<OcBridgeProcess> {
     system
         .processes()
@@ -1033,7 +1088,7 @@ fn stop_processes(
 
     let start = Instant::now();
     loop {
-        system.refresh_processes();
+        system.refresh_processes_specifics(ProcessRefreshKind::new());
         let still_running = procs
             .iter()
             .any(|p| get_process_by_pid(system, p.pid_u32).is_some());
