@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tracing::{debug, warn};
 
 use crate::{
     bootloader, bridge_control, halfkay, hex,
@@ -13,13 +14,19 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum FlashSelection {
+    /// Auto-select a target using safe heuristics.
     Auto,
+    /// Select all detected targets.
     All,
+    /// Select a single target using a parsed selector.
     Device(selector::TargetSelector),
 }
 
 #[derive(Debug, Clone)]
 pub struct FlashOptions {
+    /// Flash behavior and device discovery options.
+    ///
+    /// Defaults aim to be safe and reliable.
     /// Wait for at least one target to be detected.
     pub wait: bool,
     /// Max time to wait when `wait=true` (None = forever).
@@ -165,6 +172,7 @@ pub fn plan_teensy41_with_selection<F>(
 where
     F: FnMut(OperationEvent),
 {
+    debug!(hex_path = %hex_path.display(), "load hex and plan flash");
     let fw = hex::FirmwareImage::load_teensy41(hex_path)
         .map_err(|e| FlashError::InvalidHex { source: e })?;
 
@@ -172,6 +180,13 @@ where
         bytes: fw.byte_count,
         blocks: fw.num_blocks,
     });
+
+    debug!(
+        bytes = fw.byte_count,
+        blocks = fw.num_blocks,
+        blocks_to_write = fw.blocks_to_write.len(),
+        "hex loaded"
+    );
 
     let targets = discover_targets_for_flash(opts, &mut on_event)?;
     let selected = select_targets(
@@ -223,6 +238,12 @@ where
 {
     on_event(OperationEvent::DiscoverStart);
 
+    debug!(
+        wait = opts.wait,
+        timeout_ms = opts.wait_timeout.map(|d| d.as_millis() as u64),
+        "discover targets"
+    );
+
     let start = Instant::now();
     loop {
         let targets =
@@ -239,6 +260,7 @@ where
         });
 
         if !targets.is_empty() {
+            debug!(count = targets.len(), "targets discovered");
             return Ok(targets);
         }
         if !opts.wait {
@@ -353,6 +375,7 @@ fn flash_one_target<F>(
 where
     F: FnMut(OperationEvent),
 {
+    debug!(target_id = target_id, kind = ?target.kind(), "flash target");
     match target {
         Target::HalfKay(t) => flash_halfkay_path(&t.path, target_id, fw, opts, on_event),
         Target::Serial(t) => {
@@ -372,6 +395,7 @@ where
                     std::thread::sleep(opts.soft_reboot_delay);
                 }
                 Err(e) => {
+                    warn!(target_id = target_id, port = %t.port_name, err = %e, "soft reboot failed");
                     on_event(OperationEvent::SoftRebootSkipped {
                         target_id: target_id.to_string(),
                         error: e.to_string(),

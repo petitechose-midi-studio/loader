@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
+use tracing::{debug, warn};
 
 mod cmd;
 mod ipc;
@@ -188,6 +189,8 @@ pub fn pause_oc_bridge(opts: &BridgeControlOptions) -> BridgePause {
         .clone()
         .unwrap_or_else(default_service_id_for_platform);
 
+    debug!(method = ?opts.method, enabled = opts.enabled, "pause oc-bridge");
+
     match opts.method {
         BridgeControlMethod::Auto => pause_auto(opts, &service_id),
         BridgeControlMethod::Control => pause_control_only(opts),
@@ -230,6 +233,7 @@ fn pause_control_only(opts: &BridgeControlOptions) -> BridgePause {
 }
 
 fn pause_service_only(opts: &BridgeControlOptions, service_id: &str) -> BridgePause {
+    debug!(service_id = service_id, "pause via service");
     match service::service_status(service_id) {
         Ok(ServiceStatus::Running) => match service::stop_service(service_id, opts.timeout) {
             Ok(()) => BridgePause {
@@ -275,6 +279,7 @@ fn pause_service_only(opts: &BridgeControlOptions, service_id: &str) -> BridgePa
 }
 
 fn pause_process_only(opts: &BridgeControlOptions) -> BridgePause {
+    debug!("pause via process fallback");
     if !opts.allow_process_fallback {
         return BridgePause {
             guard: None,
@@ -320,6 +325,11 @@ fn pause_process_only(opts: &BridgeControlOptions) -> BridgePause {
 }
 
 fn pause_auto(opts: &BridgeControlOptions, service_id: &str) -> BridgePause {
+    debug!(
+        service_id = service_id,
+        allow_process_fallback = opts.allow_process_fallback,
+        "pause auto"
+    );
     // Prefer IPC pause/resume.
     if let Ok(()) = ipc::control_pause(opts.control_port, opts.control_timeout) {
         return BridgePause {
@@ -375,6 +385,7 @@ fn pause_auto(opts: &BridgeControlOptions, service_id: &str) -> BridgePause {
         Ok(ServiceStatus::NotInstalled) => {}
         Err(e) => {
             // Fail-safe: don't guess and kill processes if we can't even query the service.
+            warn!(service_id = service_id, err = %e, "unable to query bridge service");
             return BridgePause {
                 guard: None,
                 outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {

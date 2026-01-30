@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use thiserror::Error;
+use tracing::{debug, warn};
 
 use crate::api::FlashSelection;
 use crate::operation::OperationEvent;
@@ -9,6 +10,9 @@ use crate::{bootloader, bridge_control, halfkay, serial_reboot, targets, targets
 
 #[derive(Debug, Clone)]
 pub struct RebootOptions {
+    /// Reboot behavior and bridge coordination options.
+    ///
+    /// Defaults aim to be safe and reliable.
     /// Prefer a specific serial port name when selecting among multiple Serial targets.
     ///
     /// Example: "COM6" or "/dev/ttyACM0".
@@ -100,6 +104,7 @@ pub fn reboot_teensy41_with_selection<F>(
 where
     F: FnMut(OperationEvent),
 {
+    debug!("reboot teensy41 with selection");
     on_event(OperationEvent::DiscoverStart);
     let targets =
         targets::discover_targets().map_err(|e| RebootError::DiscoveryFailed { source: e })?;
@@ -153,6 +158,7 @@ fn reboot_one_target<F>(
 where
     F: FnMut(OperationEvent),
 {
+    debug!(target_id = target_id, kind = ?target.kind(), "reboot target");
     match target {
         Target::HalfKay(t) => {
             on_event(OperationEvent::HalfKayOpen {
@@ -177,6 +183,7 @@ where
                     std::thread::sleep(opts.soft_reboot_delay);
                 }
                 Err(e) => {
+                    warn!(target_id = target_id, port = %t.port_name, err = %e, "soft reboot failed");
                     on_event(OperationEvent::SoftRebootSkipped {
                         target_id: target_id.to_string(),
                         error: e.to_string(),

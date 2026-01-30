@@ -6,9 +6,12 @@ mod cli;
 mod commands;
 mod context;
 mod exit_codes;
+mod logging;
 mod output;
 
 fn main() {
+    logging::init_tracing();
+
     let cli = cli::Cli::parse();
 
     let exit_code = match cli.command {

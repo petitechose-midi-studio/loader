@@ -5,14 +5,18 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum OperationEvent {
+    /// Target discovery begins.
     DiscoverStart,
+    /// A target was observed during discovery.
     TargetDetected {
         index: usize,
         target: Target,
     },
+    /// Target discovery finished for this poll.
     DiscoverDone {
         count: usize,
     },
+    /// A single target has been chosen for operation.
     TargetSelected {
         target_id: String,
     },
@@ -38,10 +42,12 @@ pub enum OperationEvent {
         blocks: usize,
     },
 
+    /// Operation begins on a target.
     TargetStart {
         target_id: String,
         kind: TargetKind,
     },
+    /// Operation finished on a target.
     TargetDone {
         target_id: String,
         ok: bool,
