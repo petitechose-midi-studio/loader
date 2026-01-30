@@ -51,6 +51,14 @@ struct BridgeControlArgs {
     /// - macOS: launchd label (default: com.petitechose.open-control-bridge)
     #[arg(long)]
     bridge_service_id: Option<String>,
+
+    /// Local oc-bridge control port (pause/resume IPC).
+    #[arg(long, default_value_t = 7999)]
+    bridge_control_port: u16,
+
+    /// Max time to wait for oc-bridge IPC.
+    #[arg(long, default_value_t = 2500)]
+    bridge_control_timeout_ms: u64,
 }
 
 #[derive(Parser)]
@@ -253,6 +261,8 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
             enabled: !args.bridge.no_bridge_control,
             service_id: args.bridge.bridge_service_id.clone(),
             timeout: Duration::from_millis(args.bridge.bridge_timeout_ms),
+            control_port: args.bridge.bridge_control_port,
+            control_timeout: Duration::from_millis(args.bridge.bridge_control_timeout_ms),
         };
 
         if args.json {
@@ -266,6 +276,7 @@ fn cmd_reboot(args: RebootArgs) -> i32 {
             midi_studio_loader::bridge_control::BridgePauseOutcome::Paused(info) => {
                 if args.json {
                     let method = match info.method {
+                        midi_studio_loader::bridge_control::BridgePauseMethod::Control => "control",
                         midi_studio_loader::bridge_control::BridgePauseMethod::Service => "service",
                         midi_studio_loader::bridge_control::BridgePauseMethod::Process => "process",
                     };
@@ -502,6 +513,8 @@ fn cmd_flash(args: FlashArgs) -> i32 {
         enabled: !args.bridge.no_bridge_control,
         service_id: args.bridge.bridge_service_id.clone(),
         timeout: Duration::from_millis(args.bridge.bridge_timeout_ms),
+        control_port: args.bridge.bridge_control_port,
+        control_timeout: Duration::from_millis(args.bridge.bridge_control_timeout_ms),
     };
 
     let opts = api::FlashOptions {
@@ -590,6 +603,7 @@ fn handle_flash_event(args: &FlashArgs, ev: api::FlashEvent) {
         api::FlashEvent::BridgePaused { info } => {
             if args.json {
                 let method = match info.method {
+                    midi_studio_loader::bridge_control::BridgePauseMethod::Control => "control",
                     midi_studio_loader::bridge_control::BridgePauseMethod::Service => "service",
                     midi_studio_loader::bridge_control::BridgePauseMethod::Process => "process",
                 };

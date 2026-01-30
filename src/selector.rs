@@ -41,6 +41,14 @@ pub fn parse_selector(s: &str) -> Result<TargetSelector, SelectorError> {
         return Ok(TargetSelector::Id(s.to_string()));
     }
 
+    // Bare digits => treat as list index.
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        let idx: usize = s
+            .parse()
+            .map_err(|_| SelectorError::InvalidSelector(format!("invalid index: {s}")))?;
+        return Ok(TargetSelector::Index(idx));
+    }
+
     // Bare selector => treat as serial port name.
     Ok(TargetSelector::Id(format!("serial:{s}")))
 }

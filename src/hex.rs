@@ -26,7 +26,13 @@ impl FirmwareImage {
 
         for (line_no, line) in r.lines().enumerate() {
             let line_no = line_no + 1;
-            let line = line.map_err(HexError::Io)?;
+            let line = match line {
+                Ok(s) => s,
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    return Err(HexError::NotText { line_no });
+                }
+                Err(e) => return Err(HexError::Io(e)),
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -141,6 +147,11 @@ impl FirmwareImage {
 pub enum HexError {
     #[error("io: {0}")]
     Io(io::Error),
+
+    #[error(
+        "input is not a text Intel HEX file (invalid UTF-8 at line {line_no}); did you pass a .elf?"
+    )]
+    NotText { line_no: usize },
 
     #[error("invalid hex line {line_no}: {msg}")]
     InvalidLine { line_no: usize, msg: String },
