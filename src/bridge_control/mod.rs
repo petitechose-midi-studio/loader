@@ -171,6 +171,14 @@ impl Drop for BridgeGuard {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_noop_guard() -> BridgeGuard {
+    BridgeGuard {
+        resume: None,
+        timeout: Duration::from_millis(1),
+    }
+}
+
 pub struct BridgePause {
     pub guard: Option<BridgeGuard>,
     pub outcome: BridgePauseOutcome,
@@ -263,10 +271,7 @@ fn pause_service_only(opts: &BridgeControlOptions, service_id: &str) -> BridgePa
         },
         Ok(ServiceStatus::NotInstalled) => BridgePause {
             guard: None,
-            outcome: BridgePauseOutcome::Failed(BridgeControlErrorInfo {
-                message: format!("bridge service '{service_id}' is not installed"),
-                hint: Some(service::hint_query_service(service_id)),
-            }),
+            outcome: BridgePauseOutcome::Skipped(BridgePauseSkipReason::NotInstalled),
         },
         Err(e) => BridgePause {
             guard: None,

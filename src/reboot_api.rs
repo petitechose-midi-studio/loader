@@ -75,6 +75,9 @@ pub enum RebootError {
     #[error("HalfKay did not appear after soft reboot")]
     HalfKayTimeout,
 
+    #[error("unable to pause oc-bridge: {message}")]
+    BridgePauseFailed { message: String },
+
     #[error("reboot failed for {failed}/{total} targets")]
     MultiTargetFailed { failed: usize, total: usize },
 
@@ -90,6 +93,7 @@ impl RebootError {
             RebootError::DiscoveryFailed { .. } => RebootErrorKind::Unexpected,
             RebootError::SoftRebootFailed { .. } => RebootErrorKind::NoDevice,
             RebootError::HalfKayTimeout => RebootErrorKind::NoDevice,
+            RebootError::BridgePauseFailed { .. } => RebootErrorKind::Unexpected,
             RebootError::MultiTargetFailed { .. } => RebootErrorKind::NoDevice,
             RebootError::Unexpected { .. } => RebootErrorKind::Unexpected,
         }
@@ -141,10 +145,18 @@ where
     crate::operation_runner::run_targets_with_bridge(
         selected,
         &opts.bridge,
+        bridge_control::pause_oc_bridge,
         |target, target_id, on_event| reboot_one_target(target, target_id, opts, on_event),
         |e| matches!(e.kind(), RebootErrorKind::AmbiguousTarget),
         |message| RebootError::AmbiguousTarget { message },
         |failed, total| RebootError::MultiTargetFailed { failed, total },
+        |err| {
+            let mut msg = err.message;
+            if let Some(hint) = err.hint {
+                msg = format!("{msg} ({hint})");
+            }
+            RebootError::BridgePauseFailed { message: msg }
+        },
         &mut on_event,
     )
 }

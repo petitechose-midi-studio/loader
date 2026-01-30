@@ -95,6 +95,9 @@ pub enum FlashError {
         source: hex::HexError,
     },
 
+    #[error("unable to pause oc-bridge: {message}")]
+    BridgePauseFailed { message: String },
+
     #[error("soft reboot failed on {port}: {source}")]
     SoftRebootFailed {
         port: String,
@@ -136,6 +139,7 @@ impl FlashError {
             FlashError::AmbiguousTarget { .. } => FlashErrorKind::AmbiguousTarget,
             FlashError::DiscoveryFailed { .. } => FlashErrorKind::Unexpected,
             FlashError::InvalidHex { .. } => FlashErrorKind::InvalidHex,
+            FlashError::BridgePauseFailed { .. } => FlashErrorKind::Unexpected,
             FlashError::SoftRebootFailed { .. } => FlashErrorKind::NoDevice,
             FlashError::OpenHalfKay { .. } => FlashErrorKind::NoDevice,
             FlashError::WriteFailed { .. } | FlashError::ReopenFailed { .. } => {
@@ -221,10 +225,18 @@ where
     crate::operation_runner::run_targets_with_bridge(
         selected,
         &opts.bridge,
+        bridge_control::pause_oc_bridge,
         |target, target_id, on_event| flash_one_target(target, target_id, &fw, opts, on_event),
         |e| matches!(e.kind(), FlashErrorKind::AmbiguousTarget),
         |message| FlashError::AmbiguousTarget { message },
         |failed, total| FlashError::MultiTargetFailed { failed, total },
+        |err| {
+            let mut msg = err.message;
+            if let Some(hint) = err.hint {
+                msg = format!("{msg} ({hint})");
+            }
+            FlashError::BridgePauseFailed { message: msg }
+        },
         &mut on_event,
     )
 }

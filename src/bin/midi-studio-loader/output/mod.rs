@@ -12,6 +12,7 @@ mod tests;
 pub struct OutputOptions {
     pub verbose: bool,
     pub quiet: bool,
+    pub json_timestamps: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ pub fn make_for_flash(args: &cli::FlashArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
         verbose: args.verbose,
         quiet: args.quiet,
+        json_timestamps: args.json_timestamps,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -73,6 +75,7 @@ pub fn make_for_reboot(args: &cli::RebootArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
         verbose: args.verbose,
         quiet: false,
+        json_timestamps: args.json_timestamps,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -85,6 +88,7 @@ pub fn make_for_list(args: &cli::ListArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
         verbose: false,
         quiet: false,
+        json_timestamps: false,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))
@@ -97,6 +101,7 @@ pub fn make_for_doctor(args: &cli::DoctorArgs) -> Box<dyn Reporter> {
     let opts = OutputOptions {
         verbose: false,
         quiet: false,
+        json_timestamps: false,
     };
     if args.json {
         Box::new(json::JsonOutput::new(opts))

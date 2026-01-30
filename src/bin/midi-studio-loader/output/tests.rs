@@ -8,6 +8,8 @@ use midi_studio_loader::operation::OperationEvent;
 use midi_studio_loader::targets::{self, HalfKayTarget, SerialTarget, TargetKind};
 
 use super::human::HumanOutput;
+use super::json::JsonOutput;
+use crate::output::OutputOptions;
 
 fn keys(v: &serde_json::Value) -> BTreeSet<String> {
     v.as_object()
@@ -50,6 +52,32 @@ fn json_event_has_schema_and_event() {
             assert_eq!(v.get("blocks").and_then(|v| v.as_u64()), Some(3));
         },
     );
+}
+
+#[test]
+fn json_timestamps_add_t_ms_when_enabled() {
+    let mut out = JsonOutput::new(OutputOptions {
+        verbose: false,
+        quiet: false,
+        json_timestamps: true,
+    });
+
+    let s = out.render_event_json(super::json::operation_event_to_json(
+        OperationEvent::DiscoverStart,
+    ));
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert!(v.get("t_ms").and_then(|v| v.as_u64()).is_some());
+
+    let mut out2 = JsonOutput::new(OutputOptions {
+        verbose: false,
+        quiet: false,
+        json_timestamps: false,
+    });
+    let s2 = out2.render_event_json(super::json::operation_event_to_json(
+        OperationEvent::DiscoverStart,
+    ));
+    let v2: serde_json::Value = serde_json::from_str(&s2).unwrap();
+    assert!(v2.get("t_ms").is_none());
 }
 
 #[test]

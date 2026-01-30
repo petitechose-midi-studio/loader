@@ -110,6 +110,10 @@ pub struct FlashArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Include monotonic timestamps in JSON events (milliseconds since process start).
+    #[arg(long, requires = "json")]
+    pub json_timestamps: bool,
+
     /// Validate inputs and selection without flashing.
     #[arg(long)]
     pub dry_run: bool,
@@ -181,6 +185,10 @@ pub struct RebootArgs {
     /// Emit JSON line events to stdout.
     #[arg(long)]
     pub json: bool,
+
+    /// Include monotonic timestamps in JSON events (milliseconds since process start).
+    #[arg(long, requires = "json")]
+    pub json_timestamps: bool,
 
     /// More logs to stderr.
     #[arg(long, short)]

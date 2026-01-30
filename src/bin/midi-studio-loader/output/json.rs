@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use midi_studio_loader::{operation::OperationEvent, targets};
 
@@ -39,11 +40,15 @@ impl JsonEvent {
 
 pub struct JsonOutput {
     opts: OutputOptions,
+    start: Instant,
 }
 
 impl JsonOutput {
     pub fn new(opts: OutputOptions) -> Self {
-        Self { opts }
+        Self {
+            opts,
+            start: Instant::now(),
+        }
     }
 }
 
@@ -55,11 +60,19 @@ impl JsonOutput {
         );
     }
 
+    pub(crate) fn render_event_json(&mut self, ev: JsonEvent) -> String {
+        let mut ev = ev;
+        if self.opts.json_timestamps {
+            ev.fields.insert(
+                "t_ms",
+                serde_json::Value::from(self.start.elapsed().as_millis() as u64),
+            );
+        }
+        serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string())
+    }
+
     fn json_event(&mut self, ev: JsonEvent) {
-        println!(
-            "{}",
-            serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string())
-        );
+        println!("{}", self.render_event_json(ev));
     }
 
     fn error_event(&mut self, code: i32, msg: &str) {
