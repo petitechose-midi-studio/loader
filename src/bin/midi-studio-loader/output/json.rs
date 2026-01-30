@@ -58,13 +58,6 @@ impl JsonOutput {
 }
 
 impl JsonOutput {
-    fn json_value(&mut self, value: serde_json::Value) {
-        println!(
-            "{}",
-            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
-        );
-    }
-
     pub(crate) fn render_event_json(&mut self, ev: JsonEvent) -> String {
         let mut ev = ev;
         if self.opts.json_timestamps {
@@ -101,11 +94,7 @@ impl Reporter for JsonOutput {
                 self.json_event(operation_summary_to_json(summary));
             }
             Event::DryRun(summary) => self.json_event(dry_run_to_json(summary)),
-            Event::ListTargets(targets) => {
-                for (i, t) in targets.iter().enumerate() {
-                    self.json_value(target_to_value(i, t));
-                }
-            }
+            Event::ListTargets(targets) => self.json_event(list_to_json(&targets)),
             Event::Doctor(report) => self.json_event(doctor_to_json(report)),
             Event::Error { code, message } => self.error_event(code, &message),
             Event::HintAmbiguousTargets => {}
@@ -113,6 +102,21 @@ impl Reporter for JsonOutput {
     }
 
     fn finish(&mut self) {}
+}
+
+pub fn list_to_json(targets: &[targets::Target]) -> JsonEvent {
+    JsonEvent::status("list")
+        .with_u64("count", targets.len() as u64)
+        .with_value(
+            "targets",
+            serde_json::Value::Array(
+                targets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| target_to_value(i, t))
+                    .collect(),
+            ),
+        )
 }
 
 impl JsonOutput {
@@ -264,15 +268,7 @@ pub fn operation_event_to_json(ev: OperationEvent) -> JsonEvent {
     match ev {
         OperationEvent::DiscoverStart => JsonEvent::status("discover_start"),
         OperationEvent::TargetDetected { index, target } => JsonEvent::status("target_detected")
-            .with_u64("index", index as u64)
-            .with_str("target_id", &target.id())
-            .with_str(
-                "kind",
-                match target.kind() {
-                    targets::TargetKind::HalfKay => "halfkay",
-                    targets::TargetKind::Serial => "serial",
-                },
-            ),
+            .with_value("target", target_to_value(index, &target)),
         OperationEvent::DiscoverDone { count } => {
             JsonEvent::status("discover_done").with_u64("count", count as u64)
         }

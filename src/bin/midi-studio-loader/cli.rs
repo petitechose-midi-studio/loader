@@ -129,7 +129,7 @@ pub struct FlashArgs {
     /// - blocks: emit every block (most verbose)
     /// - percent: emit fewer progress events
     /// - none: no per-block progress events
-    #[arg(long, value_enum, default_value_t = JsonProgressArg::Blocks, requires = "json")]
+    #[arg(long, value_enum, default_value_t = JsonProgressArg::Percent, requires = "json")]
     pub json_progress: JsonProgressArg,
 
     /// Validate inputs and selection without flashing.

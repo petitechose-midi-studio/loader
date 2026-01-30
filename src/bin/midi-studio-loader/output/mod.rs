@@ -241,7 +241,7 @@ pub fn target_to_value(index: usize, t: &targets::Target) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(obj) = &mut v {
         obj.insert("index".to_string(), serde_json::Value::from(index as u64));
-        obj.insert("id".to_string(), serde_json::Value::from(t.id()));
+        obj.insert("target_id".to_string(), serde_json::Value::from(t.id()));
     }
     v
 }

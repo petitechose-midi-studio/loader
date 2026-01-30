@@ -104,14 +104,18 @@ fn operation_event_json_contract() {
             }),
         },
         "target_detected",
-        &["schema", "event", "index", "target_id", "kind"],
+        &["schema", "event", "target"],
         |v| {
-            assert_eq!(v.get("index").and_then(|v| v.as_u64()), Some(2));
+            let t = v.get("target").unwrap();
+            assert_eq!(t.get("index").and_then(|v| v.as_u64()), Some(2));
             assert_eq!(
-                v.get("target_id").and_then(|v| v.as_str()),
+                t.get("target_id").and_then(|v| v.as_str()),
                 Some("serial:COM6")
             );
-            assert_eq!(v.get("kind").and_then(|v| v.as_str()), Some("serial"));
+            assert_eq!(t.get("kind").and_then(|v| v.as_str()), Some("serial"));
+            assert_eq!(t.get("port_name").and_then(|v| v.as_str()), Some("COM6"));
+            assert_eq!(t.get("vid").and_then(|v| v.as_u64()), Some(0x16C0));
+            assert_eq!(t.get("pid").and_then(|v| v.as_u64()), Some(0x0483));
         },
     );
 
@@ -402,7 +406,35 @@ fn list_target_json_includes_index_and_id() {
 
     let v = super::target_to_value(0, &t);
     assert_eq!(v.get("index").and_then(|v| v.as_u64()), Some(0));
-    assert_eq!(v.get("id").and_then(|v| v.as_str()), Some("serial:COM6"));
+    assert_eq!(
+        v.get("target_id").and_then(|v| v.as_str()),
+        Some("serial:COM6")
+    );
+}
+
+#[test]
+fn list_json_contract() {
+    let targets = vec![targets::Target::Serial(SerialTarget {
+        port_name: "COM6".to_string(),
+        vid: 0x16C0,
+        pid: 0x0483,
+        serial_number: None,
+        manufacturer: None,
+        product: None,
+    })];
+
+    let ev = super::json::list_to_json(&targets);
+    let v = serde_json::to_value(&ev).unwrap();
+
+    assert_eq!(v.get("event").and_then(|v| v.as_str()), Some("list"));
+    assert_eq!(v.get("count").and_then(|v| v.as_u64()), Some(1));
+
+    let arr = v.get("targets").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(
+        arr[0].get("target_id").and_then(|v| v.as_str()),
+        Some("serial:COM6")
+    );
 }
 
 #[test]
