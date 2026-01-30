@@ -79,13 +79,13 @@ impl Reporter for JsonOutput {
     fn emit(&mut self, event: Event) {
         match event {
             Event::Operation(ev) => self.json_event(operation_event_to_json(ev)),
-            Event::DryRun(summary) => emit_dry_run(summary, self),
+            Event::DryRun(summary) => self.json_event(dry_run_to_json(summary)),
             Event::ListTargets(targets) => {
                 for (i, t) in targets.iter().enumerate() {
                     self.json_value(target_to_value(i, t));
                 }
             }
-            Event::Doctor(report) => emit_doctor(report, self),
+            Event::Doctor(report) => self.json_event(doctor_to_json(report)),
             Event::Error { code, message } => self.error_event(code, &message),
             Event::HintAmbiguousTargets => {}
         }
@@ -94,30 +94,28 @@ impl Reporter for JsonOutput {
     fn finish(&mut self) {}
 }
 
-fn emit_dry_run(summary: DryRunSummary, out: &mut JsonOutput) {
-    out.json_event(
-        JsonEvent::status("dry_run")
-            .with_u64("bytes", summary.bytes as u64)
-            .with_u64("blocks", summary.blocks as u64)
-            .with_u64("blocks_to_write", summary.blocks_to_write as u64)
-            .with_u64("targets", summary.target_ids.len() as u64)
-            .with_u64("needs_serial", if summary.needs_serial { 1 } else { 0 })
-            .with_u64("bridge_enabled", if summary.bridge_enabled { 1 } else { 0 })
-            .with_u64("bridge_control_port", summary.bridge_control_port as u64)
-            .with_value(
-                "target_ids",
-                serde_json::Value::Array(
-                    summary
-                        .target_ids
-                        .iter()
-                        .map(|t| serde_json::Value::from(t.clone()))
-                        .collect(),
-                ),
+pub fn dry_run_to_json(summary: DryRunSummary) -> JsonEvent {
+    JsonEvent::status("dry_run")
+        .with_u64("bytes", summary.bytes as u64)
+        .with_u64("blocks", summary.blocks as u64)
+        .with_u64("blocks_to_write", summary.blocks_to_write as u64)
+        .with_u64("targets", summary.target_ids.len() as u64)
+        .with_u64("needs_serial", if summary.needs_serial { 1 } else { 0 })
+        .with_u64("bridge_enabled", if summary.bridge_enabled { 1 } else { 0 })
+        .with_u64("bridge_control_port", summary.bridge_control_port as u64)
+        .with_value(
+            "target_ids",
+            serde_json::Value::Array(
+                summary
+                    .target_ids
+                    .iter()
+                    .map(|t| serde_json::Value::from(t.clone()))
+                    .collect(),
             ),
-    );
+        )
 }
 
-fn emit_doctor(report: DoctorReport, out: &mut JsonOutput) {
+pub fn doctor_to_json(report: DoctorReport) -> JsonEvent {
     let targets_val = serde_json::Value::Array(
         report
             .targets
@@ -162,7 +160,7 @@ fn emit_doctor(report: DoctorReport, out: &mut JsonOutput) {
         ev = ev.with_str("service_error", e);
     }
 
-    out.json_event(ev);
+    ev
 }
 
 pub fn operation_event_to_json(ev: OperationEvent) -> JsonEvent {
