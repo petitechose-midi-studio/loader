@@ -28,6 +28,18 @@ Validate selection and HEX without flashing:
 midi-studio-loader flash path/to/firmware.hex --dry-run
 ```
 
+### Output contract
+
+- Default mode prints human-readable progress/logs to stderr.
+- `--json` prints JSON lines to stdout. When `--json` is used, stdout is reserved for JSON.
+- Exit codes:
+  - 0: success
+  - 10: no device / no targets
+  - 11: invalid HEX
+  - 12: write/flash failed
+  - 13: ambiguous target selection
+  - 20: unexpected/internal error
+
 If multiple targets are connected, select one:
 
 ```bash
