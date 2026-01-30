@@ -1,6 +1,6 @@
 use crate::cli;
 
-use midi_studio_loader::{api, bridge_control, targets};
+use midi_studio_loader::{bridge_control, operation::OperationEvent, targets};
 
 pub mod human;
 pub mod json;
@@ -44,7 +44,7 @@ pub struct DoctorReport {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Flash(api::FlashEvent),
+    Operation(OperationEvent),
     DryRun(DryRunSummary),
     ListTargets(Vec<targets::Target>),
     Doctor(DoctorReport),

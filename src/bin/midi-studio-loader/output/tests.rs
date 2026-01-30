@@ -1,11 +1,11 @@
-use midi_studio_loader::api;
+use midi_studio_loader::operation::OperationEvent;
 use midi_studio_loader::targets::{self, HalfKayTarget, SerialTarget};
 
 use super::human::HumanOutput;
 
 #[test]
 fn json_event_has_schema_and_event() {
-    let ev = super::json::flash_event_to_json(api::FlashEvent::HexLoaded {
+    let ev = super::json::operation_event_to_json(OperationEvent::HexLoaded {
         bytes: 12,
         blocks: 3,
     });

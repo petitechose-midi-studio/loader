@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use midi_studio_loader::{api, targets};
+use midi_studio_loader::{operation::OperationEvent, targets};
 
 use crate::output::{target_to_value, DoctorReport, DryRunSummary, Event, OutputOptions, Reporter};
 
@@ -78,7 +78,7 @@ impl JsonOutput {
 impl Reporter for JsonOutput {
     fn emit(&mut self, event: Event) {
         match event {
-            Event::Flash(ev) => self.json_event(flash_event_to_json(ev)),
+            Event::Operation(ev) => self.json_event(operation_event_to_json(ev)),
             Event::DryRun(summary) => emit_dry_run(summary, self),
             Event::ListTargets(targets) => {
                 for (i, t) in targets.iter().enumerate() {
@@ -165,10 +165,10 @@ fn emit_doctor(report: DoctorReport, out: &mut JsonOutput) {
     out.json_event(ev);
 }
 
-pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
+pub fn operation_event_to_json(ev: OperationEvent) -> JsonEvent {
     match ev {
-        api::FlashEvent::DiscoverStart => JsonEvent::status("discover_start"),
-        api::FlashEvent::TargetDetected { index, target } => JsonEvent::status("target_detected")
+        OperationEvent::DiscoverStart => JsonEvent::status("discover_start"),
+        OperationEvent::TargetDetected { index, target } => JsonEvent::status("target_detected")
             .with_u64("index", index as u64)
             .with_str("target_id", &target.id())
             .with_str(
@@ -178,14 +178,14 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
                     targets::TargetKind::Serial => "serial",
                 },
             ),
-        api::FlashEvent::DiscoverDone { count } => {
+        OperationEvent::DiscoverDone { count } => {
             JsonEvent::status("discover_done").with_u64("count", count as u64)
         }
-        api::FlashEvent::TargetSelected { target_id } => {
+        OperationEvent::TargetSelected { target_id } => {
             JsonEvent::status("target_selected").with_str("target_id", &target_id)
         }
-        api::FlashEvent::BridgePauseStart => JsonEvent::status("bridge_pause_start"),
-        api::FlashEvent::BridgePaused { info } => {
+        OperationEvent::BridgePauseStart => JsonEvent::status("bridge_pause_start"),
+        OperationEvent::BridgePaused { info } => {
             let method = match info.method {
                 midi_studio_loader::bridge_control::BridgePauseMethod::Control => "control",
                 midi_studio_loader::bridge_control::BridgePauseMethod::Service => "service",
@@ -204,7 +204,7 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
                     ),
                 )
         }
-        api::FlashEvent::BridgePauseSkipped { reason } => {
+        OperationEvent::BridgePauseSkipped { reason } => {
             let reason = match reason {
                 midi_studio_loader::bridge_control::BridgePauseSkipReason::Disabled => "disabled",
                 midi_studio_loader::bridge_control::BridgePauseSkipReason::NotRunning => "not_running",
@@ -215,7 +215,7 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             };
             JsonEvent::status("bridge_pause_skipped").with_str("reason", reason)
         }
-        api::FlashEvent::BridgePauseFailed { error } => {
+        OperationEvent::BridgePauseFailed { error } => {
             let mut ev =
                 JsonEvent::status("bridge_pause_failed").with_str("message", &error.message);
             if let Some(hint) = &error.hint {
@@ -223,9 +223,9 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             }
             ev
         }
-        api::FlashEvent::BridgeResumeStart => JsonEvent::status("bridge_resume_start"),
-        api::FlashEvent::BridgeResumed => JsonEvent::status("bridge_resumed"),
-        api::FlashEvent::BridgeResumeFailed { error } => {
+        OperationEvent::BridgeResumeStart => JsonEvent::status("bridge_resume_start"),
+        OperationEvent::BridgeResumed => JsonEvent::status("bridge_resumed"),
+        OperationEvent::BridgeResumeFailed { error } => {
             let mut ev =
                 JsonEvent::status("bridge_resume_failed").with_str("message", &error.message);
             if let Some(hint) = &error.hint {
@@ -233,10 +233,10 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             }
             ev
         }
-        api::FlashEvent::HexLoaded { bytes, blocks } => JsonEvent::status("hex_loaded")
+        OperationEvent::HexLoaded { bytes, blocks } => JsonEvent::status("hex_loaded")
             .with_u64("bytes", bytes as u64)
             .with_u64("blocks", blocks as u64),
-        api::FlashEvent::TargetStart { target_id, kind } => JsonEvent::status("target_start")
+        OperationEvent::TargetStart { target_id, kind } => JsonEvent::status("target_start")
             .with_str("target_id", &target_id)
             .with_str(
                 "kind",
@@ -245,7 +245,7 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
                     targets::TargetKind::Serial => "serial",
                 },
             ),
-        api::FlashEvent::TargetDone {
+        OperationEvent::TargetDone {
             target_id,
             ok,
             message,
@@ -258,23 +258,23 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             }
             ev
         }
-        api::FlashEvent::SoftReboot { target_id, port } => JsonEvent::status("soft_reboot")
+        OperationEvent::SoftReboot { target_id, port } => JsonEvent::status("soft_reboot")
             .with_str("target_id", &target_id)
             .with_str("port", &port),
-        api::FlashEvent::SoftRebootSkipped { target_id, error } => {
+        OperationEvent::SoftRebootSkipped { target_id, error } => {
             JsonEvent::status("soft_reboot_skipped")
                 .with_str("target_id", &target_id)
                 .with_str("message", &error)
         }
-        api::FlashEvent::HalfKayAppeared { target_id, path } => {
+        OperationEvent::HalfKayAppeared { target_id, path } => {
             JsonEvent::status("halfkay_appeared")
                 .with_str("target_id", &target_id)
                 .with_str("path", &path)
         }
-        api::FlashEvent::HalfKayOpen { target_id, path } => JsonEvent::status("halfkay_open")
+        OperationEvent::HalfKayOpen { target_id, path } => JsonEvent::status("halfkay_open")
             .with_str("target_id", &target_id)
             .with_str("path", &path),
-        api::FlashEvent::Block {
+        OperationEvent::Block {
             target_id,
             index,
             total,
@@ -284,7 +284,7 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             .with_u64("i", index as u64)
             .with_u64("n", total as u64)
             .with_u64("addr", addr as u64),
-        api::FlashEvent::Retry {
+        OperationEvent::Retry {
             target_id,
             addr,
             attempt,
@@ -296,10 +296,10 @@ pub fn flash_event_to_json(ev: api::FlashEvent) -> JsonEvent {
             .with_u64("attempt", attempt as u64)
             .with_u64("retries", retries as u64)
             .with_str("error", &error),
-        api::FlashEvent::Boot { target_id } => {
+        OperationEvent::Boot { target_id } => {
             JsonEvent::status("boot").with_str("target_id", &target_id)
         }
-        api::FlashEvent::Done { target_id } => {
+        OperationEvent::Done { target_id } => {
             JsonEvent::status("done").with_str("target_id", &target_id)
         }
     }

@@ -1,6 +1,6 @@
 use std::io::{IsTerminal, Write};
 
-use midi_studio_loader::{api, targets};
+use midi_studio_loader::{operation::OperationEvent, targets};
 
 use midi_studio_loader::teensy41;
 
@@ -123,21 +123,21 @@ impl HumanOutput {
 }
 
 impl HumanOutput {
-    fn on_flash_event(&mut self, ev: api::FlashEvent) {
+    fn on_operation_event(&mut self, ev: OperationEvent) {
         match ev {
-            api::FlashEvent::DiscoverStart => {
+            OperationEvent::DiscoverStart => {
                 if self.mode() != Mode::Quiet {
                     self.println("discover targets...");
                 }
             }
-            api::FlashEvent::TargetDetected { index, target } => {
+            OperationEvent::TargetDetected { index, target } => {
                 let id = target.id();
                 self.remember_target(index, target);
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("target[{index}]: {id}"));
                 }
             }
-            api::FlashEvent::DiscoverDone { count } => {
+            OperationEvent::DiscoverDone { count } => {
                 if self.mode() == Mode::Progress {
                     if count == 0 && self.wait_enabled && !self.waiting_printed {
                         self.println("waiting for device... (use --wait-timeout-ms to limit)");
@@ -148,47 +148,47 @@ impl HumanOutput {
                     }
                 }
             }
-            api::FlashEvent::TargetSelected { target_id } => {
+            OperationEvent::TargetSelected { target_id } => {
                 if self.mode() != Mode::Quiet {
                     self.println(&format!("selected: {target_id}"));
                 }
             }
-            api::FlashEvent::BridgePauseStart => {
+            OperationEvent::BridgePauseStart => {
                 if self.mode() != Mode::Quiet {
                     self.println("pausing oc-bridge...");
                 }
             }
-            api::FlashEvent::BridgePaused { info } => {
+            OperationEvent::BridgePaused { info } => {
                 if self.mode() != Mode::Quiet {
                     self.println(&format!("oc-bridge paused ({:?})", info.method));
                 }
             }
-            api::FlashEvent::BridgePauseSkipped { reason } => {
+            OperationEvent::BridgePauseSkipped { reason } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("oc-bridge pause skipped ({reason:?})"));
                 }
             }
-            api::FlashEvent::BridgePauseFailed { error } => {
+            OperationEvent::BridgePauseFailed { error } => {
                 if self.mode() != Mode::Quiet {
                     self.println(&format!("oc-bridge pause failed: {}", error.message));
                 }
             }
-            api::FlashEvent::BridgeResumeStart => {
+            OperationEvent::BridgeResumeStart => {
                 if self.mode() == Mode::Verbose {
                     self.println("resuming oc-bridge...");
                 }
             }
-            api::FlashEvent::BridgeResumed => {
+            OperationEvent::BridgeResumed => {
                 if self.mode() == Mode::Verbose {
                     self.println("oc-bridge resumed");
                 }
             }
-            api::FlashEvent::BridgeResumeFailed { error } => {
+            OperationEvent::BridgeResumeFailed { error } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("oc-bridge resume failed: {}", error.message));
                 }
             }
-            api::FlashEvent::HexLoaded { bytes, blocks } => {
+            OperationEvent::HexLoaded { bytes, blocks } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!(
                         "Loaded {bytes} bytes ({blocks} blocks) for Teensy 4.1"
@@ -197,7 +197,7 @@ impl HumanOutput {
                     self.println(&format!("firmware loaded: {bytes} bytes ({blocks} blocks)"));
                 }
             }
-            api::FlashEvent::TargetStart { target_id, .. } => {
+            OperationEvent::TargetStart { target_id, .. } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("target start: {target_id}"));
                 } else if self.mode() == Mode::Progress {
@@ -205,7 +205,7 @@ impl HumanOutput {
                     self.last_percent = None;
                 }
             }
-            api::FlashEvent::TargetDone {
+            OperationEvent::TargetDone {
                 target_id,
                 ok,
                 message,
@@ -231,31 +231,31 @@ impl HumanOutput {
                     }
                 }
             }
-            api::FlashEvent::SoftReboot { port, .. } => {
+            OperationEvent::SoftReboot { port, .. } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("Soft reboot via serial: {port} (baud=134)"));
                 } else if self.mode() == Mode::Progress {
                     self.println(&format!("soft reboot: {port}"));
                 }
             }
-            api::FlashEvent::SoftRebootSkipped { error, .. } => {
+            OperationEvent::SoftRebootSkipped { error, .. } => {
                 if self.mode() != Mode::Quiet {
                     self.println(&format!("soft reboot skipped: {error}"));
                 }
             }
-            api::FlashEvent::HalfKayAppeared { .. } => {
+            OperationEvent::HalfKayAppeared { .. } => {
                 if self.mode() != Mode::Quiet {
                     self.println("halfkay appeared");
                 }
             }
-            api::FlashEvent::HalfKayOpen { path, .. } => {
+            OperationEvent::HalfKayOpen { path, .. } => {
                 if self.mode() == Mode::Verbose {
                     self.println(&format!("HalfKay open: {path}"));
                 } else if self.mode() == Mode::Progress {
                     self.println("halfkay open");
                 }
             }
-            api::FlashEvent::Block {
+            OperationEvent::Block {
                 index, total, addr, ..
             } => {
                 if self.mode() == Mode::Verbose {
@@ -269,7 +269,7 @@ impl HumanOutput {
                     self.progress_update(percent, index + 1, total, addr);
                 }
             }
-            api::FlashEvent::Retry {
+            OperationEvent::Retry {
                 addr,
                 attempt,
                 retries,
@@ -283,13 +283,13 @@ impl HumanOutput {
                     ));
                 }
             }
-            api::FlashEvent::Boot { .. } => {
+            OperationEvent::Boot { .. } => {
                 if self.mode() == Mode::Progress {
                     self.finish_line();
                     self.println("booting device...");
                 }
             }
-            api::FlashEvent::Done { .. } => {
+            OperationEvent::Done { .. } => {
                 if self.mode() == Mode::Progress {
                     self.finish_line();
                 }
@@ -301,7 +301,7 @@ impl HumanOutput {
 impl Reporter for HumanOutput {
     fn emit(&mut self, event: Event) {
         match event {
-            Event::Flash(ev) => self.on_flash_event(ev),
+            Event::Operation(ev) => self.on_operation_event(ev),
             Event::DryRun(summary) => emit_dry_run(summary, self),
             Event::ListTargets(targets) => emit_list_targets(&targets, self),
             Event::Doctor(report) => emit_doctor(report, self),

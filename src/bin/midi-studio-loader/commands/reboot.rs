@@ -22,7 +22,7 @@ pub fn run(args: cli::RebootArgs, out: &mut dyn Reporter) -> i32 {
     };
 
     let r = reboot_api::reboot_teensy41_with_selection(&opts, selection, |ev| {
-        out.emit(Event::Flash(ev))
+        out.emit(Event::Operation(ev))
     });
     match r {
         Ok(()) => exit_codes::EXIT_OK,

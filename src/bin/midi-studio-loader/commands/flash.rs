@@ -35,7 +35,7 @@ pub fn run(args: cli::FlashArgs, out: &mut dyn Reporter) -> i32 {
     }
 
     let r = api::flash_teensy41_with_selection(&args.hex, &opts, selection, |ev| {
-        out.emit(Event::Flash(ev))
+        out.emit(Event::Operation(ev))
     });
 
     match r {
@@ -60,8 +60,9 @@ fn dry_run(
     selection: api::FlashSelection,
     out: &mut dyn Reporter,
 ) -> i32 {
-    let r =
-        api::plan_teensy41_with_selection(hex, opts, selection, |ev| out.emit(Event::Flash(ev)));
+    let r = api::plan_teensy41_with_selection(hex, opts, selection, |ev| {
+        out.emit(Event::Operation(ev))
+    });
     match r {
         Ok(plan) => {
             let summary = DryRunSummary {
