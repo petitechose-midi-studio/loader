@@ -444,66 +444,64 @@ fn service_status(service_id: &str) -> Result<ServiceStatus, BridgeControlError>
     }
 }
 
+#[cfg(windows)]
 fn stop_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControlError> {
-    #[cfg(windows)]
-    {
-        let _ = run_capture("sc", &["stop", service_id], None)?;
-        wait_for_service_state(service_id, 1, timeout)
-    }
+    let _ = run_capture("sc", &["stop", service_id], None)?;
+    wait_for_service_state(service_id, 1, timeout)
+}
 
+#[cfg(not(windows))]
+fn stop_service(service_id: &str) -> Result<(), BridgeControlError> {
     #[cfg(target_os = "linux")]
     {
-        let _timeout = timeout;
         let _ = run_capture(
             "systemctl",
             &["--user", "stop", service_id],
             Some(linux_user_env_fix()),
         )?;
-        Ok(())
+        return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _timeout = timeout;
         let _ = run_capture("launchctl", &["stop", service_id], None)?;
-        Ok(())
+        return Ok(());
     }
 
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (service_id, timeout);
+        let _ = service_id;
         Ok(())
     }
 }
 
+#[cfg(windows)]
 fn start_service(service_id: &str, timeout: Duration) -> Result<(), BridgeControlError> {
-    #[cfg(windows)]
-    {
-        let _ = run_capture("sc", &["start", service_id], None)?;
-        wait_for_service_state(service_id, 4, timeout)
-    }
+    let _ = run_capture("sc", &["start", service_id], None)?;
+    wait_for_service_state(service_id, 4, timeout)
+}
 
+#[cfg(not(windows))]
+fn start_service(service_id: &str) -> Result<(), BridgeControlError> {
     #[cfg(target_os = "linux")]
     {
-        let _timeout = timeout;
         let _ = run_capture(
             "systemctl",
             &["--user", "start", service_id],
             Some(linux_user_env_fix()),
         )?;
-        Ok(())
+        return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _timeout = timeout;
         let _ = run_capture("launchctl", &["start", service_id], None)?;
-        Ok(())
+        return Ok(());
     }
 
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (service_id, timeout);
+        let _ = service_id;
         Ok(())
     }
 }
@@ -779,13 +777,10 @@ fn find_oc_bridge_processes(system: &System) -> Vec<OcBridgeProcess> {
                 return None;
             }
 
-            let exe = p.exe().and_then(|e| {
-                if e.as_os_str().is_empty() {
-                    None
-                } else {
-                    Some(e.to_path_buf())
-                }
-            });
+            let exe = match p.exe() {
+                Some(e) if !e.as_os_str().is_empty() => Some(e.to_path_buf()),
+                _ => None,
+            };
 
             let cmd = {
                 let c = p.cmd();
