@@ -3,6 +3,7 @@ pub mod bootloader;
 pub mod bridge_control;
 pub mod halfkay;
 pub mod hex;
+pub mod reboot_api;
 pub mod selector;
 pub mod serial_reboot;
 pub mod targets;
