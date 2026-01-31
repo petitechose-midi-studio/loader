@@ -545,7 +545,7 @@ fn operation_summary_json_contract() {
     assert_eq!(
         v.get("targets_ok_ids")
             .and_then(|v| v.as_array())
-            .and_then(|a| a.get(0))
+            .and_then(|a| a.first())
             .and_then(|v| v.as_str()),
         Some("serial:COM6")
     );

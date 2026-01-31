@@ -2,6 +2,7 @@ use crate::bridge_control;
 use crate::operation::OperationEvent;
 use crate::targets::{Target, TargetKind};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_targets_with_bridge<
     F,
     E,
@@ -200,14 +201,14 @@ mod tests {
                 Ok(())
             },
             |_e: &DummyError| false,
-            |msg| DummyError(msg),
+            DummyError,
             |_failed, _total| DummyError("multi".to_string()),
             |err| DummyError(err.message),
             &mut |ev| events2.lock().unwrap().push(ev),
         );
 
         assert!(res.is_err());
-        assert_eq!(*ran.lock().unwrap(), false);
+        assert!(!*ran.lock().unwrap());
 
         let evs = events.lock().unwrap();
         assert!(evs
@@ -255,7 +256,7 @@ mod tests {
             },
             |_target, _target_id, _on_event| Err(DummyError("boom".to_string())),
             |_e: &DummyError| false,
-            |msg| DummyError(msg),
+            DummyError,
             |_failed, _total| DummyError("multi".to_string()),
             |err| DummyError(err.message),
             &mut |ev| events2.lock().unwrap().push(ev),
@@ -296,7 +297,7 @@ mod tests {
             |_opts| panic!("pause bridge should not be called for halfkay targets"),
             |_target, _target_id, _on_event| Ok(()),
             |_e: &DummyError| false,
-            |msg| DummyError(msg),
+            DummyError,
             |_failed, _total| DummyError("multi".to_string()),
             |err| DummyError(err.message),
             &mut |ev| events2.lock().unwrap().push(ev),
