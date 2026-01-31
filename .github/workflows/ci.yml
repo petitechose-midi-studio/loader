@@ -50,3 +50,6 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release
+
+      - name: Build (release, cli only)
+        run: cargo build --release --no-default-features --features cli
