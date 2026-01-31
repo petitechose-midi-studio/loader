@@ -2,7 +2,18 @@ use crate::bridge_control;
 use crate::operation::OperationEvent;
 use crate::targets::{Target, TargetKind};
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct RunTargetsErrors<
+    IsAmbiguous,
+    MakeAmbiguous,
+    MakeMultiFailed,
+    MakeBridgePauseFailed,
+> {
+    pub is_ambiguous: IsAmbiguous,
+    pub make_ambiguous: MakeAmbiguous,
+    pub make_multi_failed: MakeMultiFailed,
+    pub make_bridge_pause_failed: MakeBridgePauseFailed,
+}
+
 pub(crate) fn run_targets_with_bridge<
     F,
     E,
@@ -17,10 +28,7 @@ pub(crate) fn run_targets_with_bridge<
     bridge: &bridge_control::BridgeControlOptions,
     pause_bridge: PauseBridge,
     mut run_target: RunTarget,
-    is_ambiguous: IsAmbiguous,
-    make_ambiguous: MakeAmbiguous,
-    make_multi_failed: MakeMultiFailed,
-    make_bridge_pause_failed: MakeBridgePauseFailed,
+    errors: RunTargetsErrors<IsAmbiguous, MakeAmbiguous, MakeMultiFailed, MakeBridgePauseFailed>,
     on_event: &mut F,
 ) -> Result<(), E>
 where
@@ -61,7 +69,7 @@ where
                 });
                 // Safety-first: if we needed serial but couldn't pause the bridge,
                 // abort before attempting any device operations.
-                return Err(make_bridge_pause_failed(error.clone()));
+                return Err((errors.make_bridge_pause_failed)(error.clone()));
             }
         }
         bridge_guard = paused.guard;
@@ -85,7 +93,7 @@ where
                 }
                 Err(e) => {
                     failed += 1;
-                    if is_ambiguous(&e) && ambiguous_message.is_none() {
+                    if (errors.is_ambiguous)(&e) && ambiguous_message.is_none() {
                         ambiguous_message = Some(e.to_string());
                     }
 
@@ -107,9 +115,9 @@ where
     let result = if let Some(e) = fatal_err {
         Err(e)
     } else if let Some(message) = ambiguous_message {
-        Err(make_ambiguous(message))
+        Err((errors.make_ambiguous)(message))
     } else if failed > 0 {
-        Err(make_multi_failed(failed, total))
+        Err((errors.make_multi_failed)(failed, total))
     } else {
         Ok(())
     };
@@ -200,10 +208,14 @@ mod tests {
                 *ran2.lock().unwrap() = true;
                 Ok(())
             },
-            |_e: &DummyError| false,
-            DummyError,
-            |_failed, _total| DummyError("multi".to_string()),
-            |err| DummyError(err.message),
+            RunTargetsErrors {
+                is_ambiguous: |_e: &DummyError| false,
+                make_ambiguous: DummyError,
+                make_multi_failed: |_failed, _total| DummyError("multi".to_string()),
+                make_bridge_pause_failed: |err: bridge_control::BridgeControlErrorInfo| {
+                    DummyError(err.message)
+                },
+            },
             &mut |ev| events2.lock().unwrap().push(ev),
         );
 
@@ -255,10 +267,14 @@ mod tests {
                 ),
             },
             |_target, _target_id, _on_event| Err(DummyError("boom".to_string())),
-            |_e: &DummyError| false,
-            DummyError,
-            |_failed, _total| DummyError("multi".to_string()),
-            |err| DummyError(err.message),
+            RunTargetsErrors {
+                is_ambiguous: |_e: &DummyError| false,
+                make_ambiguous: DummyError,
+                make_multi_failed: |_failed, _total| DummyError("multi".to_string()),
+                make_bridge_pause_failed: |err: bridge_control::BridgeControlErrorInfo| {
+                    DummyError(err.message)
+                },
+            },
             &mut |ev| events2.lock().unwrap().push(ev),
         );
 
@@ -296,10 +312,14 @@ mod tests {
             &opts,
             |_opts| panic!("pause bridge should not be called for halfkay targets"),
             |_target, _target_id, _on_event| Ok(()),
-            |_e: &DummyError| false,
-            DummyError,
-            |_failed, _total| DummyError("multi".to_string()),
-            |err| DummyError(err.message),
+            RunTargetsErrors {
+                is_ambiguous: |_e: &DummyError| false,
+                make_ambiguous: DummyError,
+                make_multi_failed: |_failed, _total| DummyError("multi".to_string()),
+                make_bridge_pause_failed: |err: bridge_control::BridgeControlErrorInfo| {
+                    DummyError(err.message)
+                },
+            },
             &mut |ev| events2.lock().unwrap().push(ev),
         );
 

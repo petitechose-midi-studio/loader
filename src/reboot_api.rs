@@ -154,15 +154,17 @@ where
         &opts.bridge,
         bridge_control::pause_oc_bridge,
         |target, target_id, on_event| reboot_one_target(target, target_id, opts, on_event),
-        |e| matches!(e.kind(), RebootErrorKind::AmbiguousTarget),
-        |message| RebootError::AmbiguousTarget { message },
-        |failed, total| RebootError::MultiTargetFailed { failed, total },
-        |err| {
-            let mut msg = err.message;
-            if let Some(hint) = err.hint {
-                msg = format!("{msg} ({hint})");
-            }
-            RebootError::BridgePauseFailed { message: msg }
+        crate::operation_runner::RunTargetsErrors {
+            is_ambiguous: |e: &RebootError| matches!(e.kind(), RebootErrorKind::AmbiguousTarget),
+            make_ambiguous: |message| RebootError::AmbiguousTarget { message },
+            make_multi_failed: |failed, total| RebootError::MultiTargetFailed { failed, total },
+            make_bridge_pause_failed: |err: bridge_control::BridgeControlErrorInfo| {
+                let mut msg = err.message;
+                if let Some(hint) = err.hint {
+                    msg = format!("{msg} ({hint})");
+                }
+                RebootError::BridgePauseFailed { message: msg }
+            },
         },
         &mut on_event,
     )

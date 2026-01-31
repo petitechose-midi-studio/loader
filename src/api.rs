@@ -231,15 +231,17 @@ where
         &opts.bridge,
         bridge_control::pause_oc_bridge,
         |target, target_id, on_event| flash_one_target(target, target_id, &fw, opts, on_event),
-        |e| matches!(e.kind(), FlashErrorKind::AmbiguousTarget),
-        |message| FlashError::AmbiguousTarget { message },
-        |failed, total| FlashError::MultiTargetFailed { failed, total },
-        |err| {
-            let mut msg = err.message;
-            if let Some(hint) = err.hint {
-                msg = format!("{msg} ({hint})");
-            }
-            FlashError::BridgePauseFailed { message: msg }
+        crate::operation_runner::RunTargetsErrors {
+            is_ambiguous: |e: &FlashError| matches!(e.kind(), FlashErrorKind::AmbiguousTarget),
+            make_ambiguous: |message| FlashError::AmbiguousTarget { message },
+            make_multi_failed: |failed, total| FlashError::MultiTargetFailed { failed, total },
+            make_bridge_pause_failed: |err: bridge_control::BridgeControlErrorInfo| {
+                let mut msg = err.message;
+                if let Some(hint) = err.hint {
+                    msg = format!("{msg} ({hint})");
+                }
+                FlashError::BridgePauseFailed { message: msg }
+            },
         },
         &mut on_event,
     )
