@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.3
+
+- Unix: align HalfKay flashing behavior with PJRC timeouts and retries.
+- Improve robustness when opening HalfKay during fast re-enumeration (udev/ACL delay).
+
 ## v0.1.2
 
 - Fix the GitHub Actions Intel macOS runner label in the release workflow.
