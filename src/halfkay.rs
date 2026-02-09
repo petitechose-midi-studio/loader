@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 
 use hidapi::HidApi;
 #[cfg(not(windows))]
@@ -15,6 +17,7 @@ use crate::{hex::FirmwareImage, teensy41};
 const SLOW_BLOCK_MAX_INDEX: usize = 4;
 const SLOW_BLOCK_TIMEOUT: Duration = Duration::from_secs(45);
 const FAST_BLOCK_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(not(windows))]
 const RETRY_SLEEP: Duration = Duration::from_millis(10);
 
 fn block_total_timeout(write_index: usize) -> Duration {
@@ -285,8 +288,10 @@ pub fn boot_teensy41(dev: &mut HalfKayDevice) -> Result<(), HalfKayError> {
     #[cfg(windows)]
     {
         // Best-effort: boot may happen immediately and invalidate the handle.
-        if let Backend::Win32(h) = &dev.backend {
-            let _ = h.write_report(&report, 500);
+        match &dev.backend {
+            Backend::Win32(h) => {
+                let _ = h.write_report(&report, 500);
+            }
         }
         Ok(())
     }
