@@ -483,10 +483,13 @@ fn flash_halfkay_path<F>(
 where
     F: FnMut(OperationEvent),
 {
-    let mut dev = halfkay::open_by_path(path).map_err(|e| FlashError::OpenHalfKay {
-        path: path.to_string(),
-        source: e,
-    })?;
+    // On Linux, udev permissions/ACLs may be applied slightly after the device node appears.
+    // Retrying open improves robustness during rapid re-enumeration.
+    let mut dev =
+        reopen_halfkay_by_path(path, opts.reopen_timeout).map_err(|e| FlashError::OpenHalfKay {
+            path: path.to_string(),
+            source: e,
+        })?;
 
     on_event(OperationEvent::HalfKayOpen {
         target_id: target_id.to_string(),
@@ -505,7 +508,7 @@ where
         let mut attempt: u32 = 0;
         loop {
             attempt = attempt.saturating_add(1);
-            match halfkay::write_block_teensy41(&dev, fw, block_addr, i) {
+            match halfkay::write_block_teensy41(&mut dev, fw, block_addr, i) {
                 Ok(()) => break,
                 Err(e) => {
                     if attempt > opts.retries {
@@ -542,7 +545,7 @@ where
         on_event(OperationEvent::Boot {
             target_id: target_id.to_string(),
         });
-        let _ = halfkay::boot_teensy41(&dev);
+        let _ = halfkay::boot_teensy41(&mut dev);
     }
 
     on_event(OperationEvent::Done {
