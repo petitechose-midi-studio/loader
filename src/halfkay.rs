@@ -1,6 +1,4 @@
-use std::time::Duration;
-#[cfg(not(windows))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hidapi::HidApi;
 #[cfg(not(windows))]
