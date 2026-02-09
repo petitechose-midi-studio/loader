@@ -9,6 +9,38 @@ use thiserror::Error;
 
 use crate::{hex::FirmwareImage, teensy41};
 
+// Match PJRC teensy_loader_cli behavior:
+// - first few blocks may take a long time (erase)
+// - later blocks should be fast
+const SLOW_BLOCK_MAX_INDEX: usize = 4;
+const SLOW_BLOCK_TIMEOUT: Duration = Duration::from_secs(45);
+const FAST_BLOCK_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(not(windows))]
+const RETRY_SLEEP: Duration = Duration::from_millis(10);
+
+fn block_total_timeout(write_index: usize) -> Duration {
+    if write_index <= SLOW_BLOCK_MAX_INDEX {
+        SLOW_BLOCK_TIMEOUT
+    } else {
+        FAST_BLOCK_TIMEOUT
+    }
+}
+
+#[cfg(not(windows))]
+fn reopen_best_effort(dev: &mut HalfKayDevice) {
+    // HID handles can become unusable after a USB reset. Reopening by the same path is cheap,
+    // but the kernel may re-enumerate to a different hidraw node, so fall back to scanning.
+    let path = dev.path.clone();
+    if let Ok(new_dev) = open_by_path(&path) {
+        *dev = new_dev;
+        return;
+    }
+
+    if let Ok(new_dev) = open_halfkay_device(false, None) {
+        *dev = new_dev;
+    }
+}
+
 #[cfg(windows)]
 mod win32;
 
@@ -153,10 +185,10 @@ pub fn open_halfkay_device(
 }
 
 pub fn write_block_teensy41(
-    dev: &HalfKayDevice,
+    dev: &mut HalfKayDevice,
     fw: &FirmwareImage,
     block_addr: usize,
-    _write_index: usize,
+    write_index: usize,
 ) -> Result<(), HalfKayError> {
     let end = block_addr + teensy41::BLOCK_SIZE;
     let mut report = [0u8; teensy41::PACKET_SIZE + 1];
@@ -164,45 +196,102 @@ pub fn write_block_teensy41(
 
     match &dev.backend {
         #[cfg(not(windows))]
-        Backend::HidApi(h) => {
-            let n = h.write(&report)?;
-            if n != report.len() {
-                return Err(HalfKayError::ShortWrite {
-                    got: n,
-                    expected: report.len(),
-                });
+        Backend::HidApi(_) => {
+            let timeout = block_total_timeout(write_index);
+            let start = Instant::now();
+            let mut last_reopen = Instant::now();
+
+            loop {
+                // Keep borrows short so we can best-effort reopen between attempts.
+                let r = match &dev.backend {
+                    Backend::HidApi(h) => h.write(&report).map_err(HalfKayError::Hid),
+                    #[allow(unreachable_patterns)]
+                    _ => return Err(HalfKayError::NoDevice),
+                };
+                match r {
+                    Ok(n) => {
+                        if n != report.len() {
+                            return Err(HalfKayError::ShortWrite {
+                                got: n,
+                                expected: report.len(),
+                            });
+                        }
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        if start.elapsed() >= timeout {
+                            return Err(err);
+                        }
+
+                        // If the HID pipe broke, reopening often recovers immediately.
+                        // Throttle reopen attempts to avoid making success cases slower.
+                        let is_broken_pipe = err.to_string().contains("Broken pipe");
+                        if is_broken_pipe && last_reopen.elapsed() >= Duration::from_millis(100) {
+                            reopen_best_effort(dev);
+                            last_reopen = Instant::now();
+                        }
+
+                        std::thread::sleep(RETRY_SLEEP);
+                    }
+                }
             }
-            Ok(())
         }
 
         #[cfg(windows)]
         Backend::Win32(h) => {
-            // Match PJRC teensy_loader_cli behavior:
-            // - first few blocks may take a long time (erase)
-            // - later blocks should be fast
-            let total_timeout_ms = if _write_index <= 4 { 45_000 } else { 500 };
+            let total_timeout_ms: u32 = block_total_timeout(write_index)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u32::MAX);
             h.write_report(&report, total_timeout_ms)
         }
     }
 }
 
-pub fn boot_teensy41(dev: &HalfKayDevice) -> Result<(), HalfKayError> {
+pub fn boot_teensy41(dev: &mut HalfKayDevice) -> Result<(), HalfKayError> {
     let mut report = [0u8; teensy41::PACKET_SIZE + 1];
     fill_boot_report_teensy41(&mut report);
 
-    // Best-effort: boot may happen immediately and invalidate the handle.
-    match &dev.backend {
-        #[cfg(not(windows))]
-        Backend::HidApi(h) => {
-            let _ = h.write(&report);
-            Ok(())
-        }
+    #[cfg(not(windows))]
+    {
+        let timeout = FAST_BLOCK_TIMEOUT;
+        let start = Instant::now();
+        let mut last_reopen = Instant::now();
 
-        #[cfg(windows)]
-        Backend::Win32(h) => {
-            let _ = h.write_report(&report, 500);
-            Ok(())
+        loop {
+            let r = match &dev.backend {
+                Backend::HidApi(h) => h.write(&report).map_err(HalfKayError::Hid),
+                #[allow(unreachable_patterns)]
+                _ => return Ok(()),
+            };
+
+            match r {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    if start.elapsed() >= timeout {
+                        return Ok(());
+                    }
+
+                    let is_broken_pipe = err.to_string().contains("Broken pipe");
+                    if is_broken_pipe && last_reopen.elapsed() >= Duration::from_millis(100) {
+                        reopen_best_effort(dev);
+                        last_reopen = Instant::now();
+                    }
+                    std::thread::sleep(RETRY_SLEEP);
+                }
+            }
         }
+    }
+
+    #[cfg(windows)]
+    {
+        // Best-effort: boot may happen immediately and invalidate the handle.
+        match &dev.backend {
+            Backend::Win32(h) => {
+                let _ = h.write_report(&report, 500);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -290,5 +379,17 @@ mod tests {
         for b in &report[4..] {
             assert_eq!(*b, 0);
         }
+    }
+
+    #[test]
+    fn test_block_total_timeout_matches_pjrc_policy() {
+        for i in 0..=SLOW_BLOCK_MAX_INDEX {
+            assert_eq!(block_total_timeout(i), SLOW_BLOCK_TIMEOUT);
+        }
+        assert_eq!(
+            block_total_timeout(SLOW_BLOCK_MAX_INDEX + 1),
+            FAST_BLOCK_TIMEOUT
+        );
+        assert_eq!(block_total_timeout(9999), FAST_BLOCK_TIMEOUT);
     }
 }
