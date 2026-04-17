@@ -92,24 +92,20 @@ impl FirmwareImage {
                     // EOF
                     break;
                 }
-                0x02 => {
+                0x02 if len == 2 => {
                     // extended segment address (<< 4)
-                    if len == 2 {
-                        let seg = u16::from_be_bytes([payload[0], payload[1]]) as u32;
-                        ext_addr = seg << 4;
-                    }
+                    let seg = u16::from_be_bytes([payload[0], payload[1]]) as u32;
+                    ext_addr = seg << 4;
                 }
-                0x04 => {
+                0x04 if len == 2 => {
                     // extended linear address (<< 16)
-                    if len == 2 {
-                        let hi = u16::from_be_bytes([payload[0], payload[1]]) as u32;
-                        ext_addr = hi << 16;
-                        // Teensy 4.x HEX uses FlexSPI base (0x60000000).
-                        if ext_addr >= teensy41::FLEXSPI_BASE
-                            && ext_addr < teensy41::FLEXSPI_BASE + teensy41::CODE_SIZE as u32
-                        {
-                            ext_addr -= teensy41::FLEXSPI_BASE;
-                        }
+                    let hi = u16::from_be_bytes([payload[0], payload[1]]) as u32;
+                    ext_addr = hi << 16;
+                    // Teensy 4.x HEX uses FlexSPI base (0x60000000).
+                    if ext_addr >= teensy41::FLEXSPI_BASE
+                        && ext_addr < teensy41::FLEXSPI_BASE + teensy41::CODE_SIZE as u32
+                    {
+                        ext_addr -= teensy41::FLEXSPI_BASE;
                     }
                 }
                 _ => {
