@@ -13,9 +13,46 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  quality_linux:
+    name: quality (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libudev-dev libusb-1.0-0-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (lib only)
+        run: cargo test --no-default-features
+
+      - name: Clippy (lib only)
+        run: cargo clippy --no-default-features --lib -- -D warnings
+
+      - name: Build (lib only)
+        run: cargo build --no-default-features --lib
+
+      - name: Build (release, cli only)
+        run: cargo build --release --no-default-features --features cli
+
+  runtime_matrix:
+    name: runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -32,29 +69,9 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test
 
-      - name: Test (lib only)
-        run: cargo test --no-default-features
-
-      - name: Clippy (lib only)
-        run: cargo clippy --no-default-features --lib -- -D warnings
-
-      - name: Build (lib only)
-        run: cargo build --no-default-features --lib
-
       - name: Build (release)
         run: cargo build --release
-
-      - name: Build (release, cli only)
-        run: cargo build --release --no-default-features --features cli
