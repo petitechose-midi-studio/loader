@@ -1,33 +1,87 @@
 name: Release
 
+run-name: Release ${{ inputs.tag || github.ref_name }} / ${{ inputs.request_id || 'tag' }}
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.3)"
+        required: true
+        type: string
+      source_sha:
+        description: "Source commit SHA (candidate tag is rc-<sha>)"
+        required: true
+        type: string
+      request_id:
+        description: "Optional dispatch correlation id"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
+  promote:
+    name: promote release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout
+      - name: Resolve release variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            release_tag="${{ inputs.tag }}"
+            source_sha="${{ inputs.source_sha }}"
+          else
+            release_tag="${GITHUB_REF_NAME}"
+            source_sha="${GITHUB_SHA}"
+          fi
+
+          if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source_sha: $source_sha" >&2
+            exit 1
+          fi
+
+          candidate_tag="rc-${source_sha}"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=$candidate_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source SHA
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.vars.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$sha" != "${{ steps.vars.outputs.source_sha }}" ]; then
+            echo "Checked out SHA does not match resolved source SHA" >&2
+            echo "resolved=${{ steps.vars.outputs.source_sha }}" >&2
+            echo "head=$sha" >&2
+            exit 1
+          fi
 
       - name: Validate tag matches Cargo version
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.release_tag }}"
           cargo_version=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
           expected="v${cargo_version}"
           if [ "$tag" != "$expected" ]; then
@@ -35,59 +89,94 @@ jobs:
             exit 1
           fi
 
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libudev-dev libusb-1.0-0-dev
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build (release)
-        run: cargo build --release
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $bin = "target/release/midi-studio-loader.exe"
-          $out = "dist/midi-studio-loader-${{ runner.os }}-${{ runner.arch }}.zip"
-          Compress-Archive -Path $bin -DestinationPath $out -Force
-
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Wait for candidate release
         shell: bash
         run: |
-          mkdir -p dist
-          out="dist/midi-studio-loader-${{ runner.os }}-${{ runner.arch }}.tar.gz"
-          tar -czf "$out" -C target/release midi-studio-loader
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.candidate_tag }}"
+          echo "Waiting for candidate release: ${tag}"
+          for _ in $(seq 1 180); do
+            if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Candidate found"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for candidate release ${tag}" >&2
+          exit 1
 
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v7
+      - name: Download candidate assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${{ steps.vars.outputs.candidate_tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir artifacts
+          ls -la artifacts
+
+      - name: Checkout ms-dev-env
+        uses: actions/checkout@v6
         with:
-          name: dist-${{ runner.os }}-${{ runner.arch }}
-          path: dist/*
+          repository: petitechose-midi-studio/ms-dev-env
+          ref: main
+          path: workspace
 
-  release:
-    name: release
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
+      - name: Setup ms runtime
+        uses: ./workspace/.github/actions/setup-ms-runtime
         with:
-          path: dist
+          working-directory: workspace
 
-      - name: List assets
-        run: ls -R dist
+      - name: Build expected candidate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/input-repos.json <<'EOF'
+          [
+            {
+              "id": "loader",
+              "repo": "petitechose-midi-studio/loader",
+              "sha": "${{ steps.vars.outputs.source_sha }}"
+            }
+          ]
+          EOF
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/**/*.zip
-            dist/**/*.tar.gz
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+      - name: Verify signed candidate metadata
+        shell: bash
+        working-directory: workspace
+        env:
+          MS_CANDIDATE_ED25519_PK: ${{ vars.MS_CANDIDATE_ED25519_PK }}
+        run: |
+          set -euo pipefail
+          uv run ms release candidate verify \
+            --artifacts-dir ../artifacts \
+            --manifest-path ../artifacts/candidate.json \
+            --checksums-path ../artifacts/checksums.txt \
+            --sig-path ../artifacts/candidate.json.sig \
+            --expected-producer-repo petitechose-midi-studio/loader \
+            --expected-producer-kind loader-binaries \
+            --expected-workflow-file .github/workflows/candidate.yml \
+            --expected-input-repos-json ../artifacts/input-repos.json
+
+      - name: Publish final release from candidate assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${{ steps.vars.outputs.release_tag }}"
+          files=(
+            artifacts/midi-studio-loader-linux-x86_64
+            artifacts/midi-studio-loader-windows-x86_64.exe
+            artifacts/midi-studio-loader-macos-x86_64
+            artifacts/midi-studio-loader-macos-arm64
+          )
+
+          if gh release view "$release_tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$release_tag" "${files[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create \
+              "$release_tag" \
+              "${files[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "midi-studio-loader $release_tag" \
+              --generate-notes
+          fi
