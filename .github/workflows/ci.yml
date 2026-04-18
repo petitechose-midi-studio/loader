@@ -47,6 +47,7 @@ jobs:
         run: cargo build --no-default-features --lib
 
       - name: Build (release, cli only)
+        if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
         run: cargo build --release --no-default-features --features cli
 
   runtime_matrix:
@@ -74,4 +75,5 @@ jobs:
         run: cargo test
 
       - name: Build (release)
+        if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
         run: cargo build --release
