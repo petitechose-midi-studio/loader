@@ -1,8 +1,11 @@
 name: Candidate
 
-run-name: Candidate ${{ inputs.source_sha }} / tooling ${{ inputs.tooling_sha }}
+run-name: Candidate ${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       source_sha:
@@ -20,16 +23,54 @@ on:
         type: string
 
 concurrency:
-  group: candidate-${{ inputs.source_sha }}-${{ inputs.tooling_sha }}
+  group: candidate-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
   cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  resolve_inputs:
+    name: resolve candidate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      tooling_sha: ${{ steps.resolve.outputs.tooling_sha }}
+      candidate_tag: ${{ steps.resolve.outputs.candidate_tag }}
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Resolve source SHA and tooling SHA
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            source_sha="${{ github.sha }}"
+            tooling_sha="$(python -c 'import json; from pathlib import Path; print(json.loads(Path(".github/release-tooling.json").read_text(encoding="utf-8"))["sha"])')"
+          else
+            source_sha="${{ inputs.source_sha }}"
+            tooling_sha="${{ inputs.tooling_sha }}"
+          fi
+          if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid source SHA: $source_sha" >&2
+            exit 1
+          fi
+          if ! [[ "$tooling_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid tooling SHA: $tooling_sha" >&2
+            exit 1
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "tooling_sha=$tooling_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=rc-${source_sha}-tooling-${tooling_sha}" >> "$GITHUB_OUTPUT"
+
   dispatch_marker:
     name: register dispatch
-    if: ${{ inputs.request_id != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.request_id != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Write dispatch marker
@@ -50,6 +91,7 @@ jobs:
 
   build:
     name: candidate (${{ matrix.platform }})
+    needs: resolve_inputs
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
@@ -68,7 +110,7 @@ jobs:
       - name: Checkout source SHA
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.resolve_inputs.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Validate source SHA
@@ -76,9 +118,9 @@ jobs:
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
-          if [ "$sha" != "${{ inputs.source_sha }}" ]; then
+          if [ "$sha" != "${{ needs.resolve_inputs.outputs.source_sha }}" ]; then
             echo "Checked out SHA does not match input" >&2
-            echo "input=${{ inputs.source_sha }}" >&2
+            echo "input=${{ needs.resolve_inputs.outputs.source_sha }}" >&2
             echo "head=$sha" >&2
             exit 1
           fi
@@ -120,7 +162,9 @@ jobs:
 
   metadata:
     name: candidate metadata
-    needs: build
+    needs:
+      - resolve_inputs
+      - build
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,27 +172,20 @@ jobs:
       - name: Checkout source SHA
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.resolve_inputs.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Checkout ms-dev-env
         uses: actions/checkout@v6
         with:
           repository: petitechose-midi-studio/ms-dev-env
-          ref: ${{ inputs.tooling_sha }}
+          ref: ${{ needs.resolve_inputs.outputs.tooling_sha }}
           path: workspace
 
       - name: Setup ms runtime
         uses: ./workspace/.github/actions/setup-ms-runtime
         with:
           working-directory: workspace
-
-      - name: Resolve candidate tag
-        id: vars
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "candidate_tag=rc-${{ inputs.source_sha }}-tooling-${{ inputs.tooling_sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Download candidate binaries
         uses: actions/download-artifact@v8
@@ -204,12 +241,12 @@ jobs:
             {
               "id": "loader",
               "repo": "petitechose-midi-studio/loader",
-              "sha": "${{ inputs.source_sha }}"
+              "sha": "${{ needs.resolve_inputs.outputs.source_sha }}"
             },
             {
               "id": "ms-dev-env",
               "repo": "petitechose-midi-studio/ms-dev-env",
-              "sha": "${{ inputs.tooling_sha }}"
+              "sha": "${{ needs.resolve_inputs.outputs.tooling_sha }}"
             }
           ]
           EOF
@@ -248,7 +285,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.vars.outputs.candidate_tag }}"
+          tag="${{ needs.resolve_inputs.outputs.candidate_tag }}"
           if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload \
               "$tag" \
@@ -261,7 +298,7 @@ jobs:
               artifacts_flat/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "candidate $tag" \
-              --notes "Candidate artifacts for ${{ inputs.source_sha }}" \
+              --notes "Candidate artifacts for ${{ needs.resolve_inputs.outputs.source_sha }}" \
               --prerelease
           fi
           gh release edit \
