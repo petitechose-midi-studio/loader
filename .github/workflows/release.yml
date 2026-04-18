@@ -1,6 +1,6 @@
 name: Release
 
-run-name: Release ${{ inputs.tag || github.ref_name }} / ${{ inputs.request_id || 'tag' }}
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
@@ -15,11 +15,6 @@ on:
       source_sha:
         description: "Source commit SHA (candidate tag is rc-<sha>)"
         required: true
-        type: string
-      request_id:
-        description: "Optional dispatch correlation id"
-        required: false
-        default: ""
         type: string
 
 concurrency:

@@ -1,6 +1,6 @@
 name: Candidate
 
-run-name: Candidate ${{ inputs.source_sha }} / tooling ${{ inputs.tooling_sha }} / ${{ inputs.request_id || 'manual' }}
+run-name: Candidate ${{ inputs.source_sha }} / tooling ${{ inputs.tooling_sha }}
 
 on:
   workflow_dispatch:
@@ -27,6 +27,27 @@ permissions:
   contents: write
 
 jobs:
+  dispatch_marker:
+    name: register dispatch
+    if: ${{ inputs.request_id != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write dispatch marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dispatch
+          cat > dispatch/marker.json <<'EOF'
+          {"request_id":"${{ inputs.request_id }}"}
+          EOF
+
+      - name: Upload dispatch marker
+        uses: actions/upload-artifact@v7
+        with:
+          name: dispatch-${{ inputs.request_id }}
+          path: dispatch/marker.json
+          retention-days: 1
+
   build:
     name: candidate (${{ matrix.platform }})
     runs-on: ${{ matrix.platform }}
