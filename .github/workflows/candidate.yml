@@ -232,6 +232,10 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "candidate $tag" \
               --notes "Candidate artifacts for ${{ inputs.source_sha }}" \
-              --draft \
               --prerelease
           fi
+          gh release edit \
+            "$tag" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --prerelease
