@@ -4,6 +4,15 @@ Minimal, robust flasher CLI for **Teensy 4.1** (HalfKay bootloader).
 
 This tool is designed to be called programmatically (stable exit codes + optional JSON output).
 
+## Release Policy
+
+- `midi-studio-loader` is a producer repo for signed loader candidates.
+- Those candidate artifacts are the canonical supply-chain objects consumed by MIDI Studio
+  distribution and related tooling.
+- The end-user system release surface remains `petitechose-midi-studio/distribution`.
+- This repo does not need an independent end-user release strategy beyond its candidate production
+  contract.
+
 ## Status
 
 Early MVP. Scope is intentionally limited to Teensy 4.1.
