@@ -27,12 +27,13 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   resolve_inputs:
     name: resolve candidate inputs
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       tooling_sha: ${{ steps.resolve.outputs.tooling_sha }}
@@ -43,6 +44,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve source SHA and tooling SHA
         id: resolve
@@ -64,6 +66,19 @@ jobs:
             echo "invalid tooling SHA: $tooling_sha" >&2
             exit 1
           fi
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+            echo "source SHA is not reachable from main: $source_sha" >&2
+            exit 1
+          fi
+          tooling_repo="$(mktemp -d)"
+          git -C "$tooling_repo" init -q
+          git -C "$tooling_repo" remote add origin https://github.com/petitechose-midi-studio/ms-dev-env.git
+          git -C "$tooling_repo" fetch --no-tags --filter=blob:none origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git -C "$tooling_repo" merge-base --is-ancestor "$tooling_sha" refs/remotes/origin/main; then
+            echo "tooling SHA is not reachable from ms-dev-env main: $tooling_sha" >&2
+            exit 1
+          fi
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "tooling_sha=$tooling_sha" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=rc-${source_sha}-tooling-${tooling_sha}" >> "$GITHUB_OUTPUT"
@@ -72,6 +87,7 @@ jobs:
     name: register dispatch
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.request_id != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Write dispatch marker
         shell: bash
@@ -93,6 +109,7 @@ jobs:
     name: candidate (${{ matrix.platform }})
     needs: resolve_inputs
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +129,7 @@ jobs:
         with:
           ref: ${{ needs.resolve_inputs.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate source SHA
         shell: bash
@@ -169,6 +187,9 @@ jobs:
       - resolve_inputs
       - build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -177,6 +198,7 @@ jobs:
         with:
           ref: ${{ needs.resolve_inputs.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout ms-dev-env
         uses: actions/checkout@v6
@@ -184,6 +206,7 @@ jobs:
           repository: petitechose-midi-studio/ms-dev-env
           ref: ${{ needs.resolve_inputs.outputs.tooling_sha }}
           path: workspace
+          persist-credentials: false
 
       - name: Setup ms runtime
         uses: ./workspace/.github/actions/setup-ms-runtime
@@ -194,13 +217,15 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: midi-studio-loader-*
+          merge-multiple: true
 
       - name: Flatten candidate binaries
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts_flat
-          find artifacts -maxdepth 5 -type f -print -exec cp '{}' artifacts_flat/ \;
+          find artifacts -maxdepth 1 -type f -print -exec cp '{}' artifacts_flat/ \;
           ls -la artifacts_flat
 
       - name: Generate candidate metadata inputs
@@ -290,20 +315,16 @@ jobs:
           set -euo pipefail
           tag="${{ needs.resolve_inputs.outputs.candidate_tag }}"
           if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload \
-              "$tag" \
-              artifacts_flat/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          else
-            gh release create \
-              "$tag" \
-              artifacts_flat/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "candidate $tag" \
-              --notes "Candidate artifacts for ${{ needs.resolve_inputs.outputs.source_sha }}" \
-              --prerelease
+            echo "candidate release already exists: $tag" >&2
+            exit 1
           fi
+          gh release create \
+            "$tag" \
+            artifacts_flat/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "candidate $tag" \
+            --notes "Candidate artifacts for ${{ needs.resolve_inputs.outputs.source_sha }}" \
+            --prerelease
           gh release edit \
             "$tag" \
             --repo "${GITHUB_REPOSITORY}" \
