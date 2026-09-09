@@ -54,7 +54,7 @@ jobs:
         run: cargo build --release --no-default-features --features cli
 
   runtime_matrix:
-    name: runtime (${{ matrix.os }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:

@@ -158,7 +158,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Collect candidate binary (Windows)
         if: runner.os == 'Windows'
